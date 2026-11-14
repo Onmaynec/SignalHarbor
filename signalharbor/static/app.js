@@ -1,7 +1,7 @@
 /* SignalHarbor operations UI. Never interpolate unescaped server text into HTML. */
 "use strict";
 const $ = (id) => document.getElementById(id);
-const state = {user:null, page:"overview", services:[], incidents:[], alerts:[], rules:[], users:[], teams:[], stream:null, loading:false, cursor:null, lastReplay:null};
+const state = {user:null, page:"overview", services:[], incidents:[], alerts:[], rules:[], users:[], teams:[], stream:null, loading:false, cursor:null, lastReplay:null, mfaDraft:null, mfaRecovery:null};
 const titles = {
   overview:["REAL-TIME OVERVIEW","Обзор инфраструктуры","Состояние сервисов и реакция на инциденты"],
   incidents:["INCIDENT RESPONSE","Управление инцидентами","Подтверждение, назначение и расследование"],
@@ -10,6 +10,7 @@ const titles = {
   services:["SERVICE CATALOG","Реестр сервисов","Сервисы и окружения в контуре наблюдения"],
   rules:["DETECTION POLICIES","Правила мониторинга","Версионированные пороги и окна"],
   inbox:["NOTIFICATION CENTER","Мои уведомления","Локальная имитация каналов доставки"],
+  security:["ACCOUNT SECURITY","Безопасность","Двухфакторная аутентификация и резервные коды"],
   diagnostics:["INGEST & DETECTION","Диагностика","Задержка обработки, очередь задач и обнаружение алертов"],
   admin:["WORKSPACE SETTINGS","Управление системой","Команды, пользователи, ключи и графики"],
 };
@@ -110,6 +111,7 @@ function action(label,callback,primary=false){
 }
 async function navigate(page){
   if(["admin","diagnostics"].includes(page)&&!isAdmin())return;
+  if(page!=="security"){state.mfaDraft=null;state.mfaRecovery=null;}
   state.page=page;state.cursor=null;
   await loadPage();
 }
@@ -125,6 +127,7 @@ async function loadPage(){
     else if(state.page==="services")await services();
     else if(state.page==="rules")await rules();
     else if(state.page==="inbox")await inbox();
+    else if(state.page==="security")await security();
     else if(state.page==="diagnostics")await diagnostics();
     else if(state.page==="admin")await admin();
   }catch(error){$("view").innerHTML=empty("Не удалось загрузить данные",error.message);showMessage(error.message);}
@@ -250,6 +253,44 @@ async function inbox(){
     rows.length?table(["Инцидент","Приоритет","Уровень","Отправлено"],rows):
     empty("Уведомлений нет","Настройте графики дежурств и превысьте порог правила"));
 }
+async function security(){
+  const status=await api("/api/v1/mfa/status");
+  let content;
+  if(status.enabled){
+    content=panel("Двухфакторная аутентификация","TOTP · АКТИВНА",
+      '<div class="diagnostics-note">При каждом новом входе требуется шестизначный код приложения-аутентификатора или одноразовый резервный код. '+
+      'Чтобы отключить защиту, подтвердите пароль и второй фактор.</div>'+
+      '<div class="form-grid">'+
+      '<label>Пароль<input id="mfa-disable-password" type="password" autocomplete="current-password"></label>'+
+      '<label>Код TOTP или резервный код<input id="mfa-disable-code" type="text" autocomplete="one-time-code"></label>'+
+      '</div><div class="form-actions"><button data-action="mfa-disable">Отключить двухфакторную защиту</button></div>');
+  }else{
+    content=panel("Подключение приложения-аутентификатора","TOTP · 30 СЕКУНД",
+      '<div class="diagnostics-note">Поддерживается любое TOTP-приложение. Секрет шифруется на сервере, а резервные коды выдаются только при включении. '+
+      'Не делитесь секретом с другими пользователями.</div>'+
+      '<div class="form-grid"><label>Подтвердите текущий пароль<input type="password" id="mfa-password" autocomplete="current-password"></label></div>'+
+      '<div class="form-actions"><button class="primary" data-action="mfa-setup">Сгенерировать секрет</button></div>'+
+      (state.mfaDraft?
+        '<div class="diagnostics-note"><strong>Секрет для приложения:</strong> <code>'+h(state.mfaDraft.secret)+'</code>'+
+        '<p>Добавьте код вручную или откройте защищённую ссылку настройки в приложении:</p>'+
+        '<code style="display:block;word-break:break-all">'+h(state.mfaDraft.otpauthUri)+'</code>'+
+        '<p>Настройка действительна 10 минут.</p></div>'+
+        '<div class="form-grid"><label>Шестизначный код из приложения'+
+        '<input type="text" id="mfa-verify-code" maxlength="6" autocomplete="one-time-code" inputmode="numeric"></label></div>'+
+        '<div class="form-actions"><button class="primary" data-action="mfa-enable">Подтвердить и включить</button></div>':""));
+  }
+  if(state.mfaRecovery&&state.mfaRecovery.length){
+    content+=panel("Резервные коды","ПОКАЗЫВАЮТСЯ ОДИН РАЗ",
+      '<div class="diagnostics-note">Сохраните коды офлайн: после ухода с этой страницы они больше не будут показаны. '+
+      'Каждый код действует только один раз.</div>'+
+      '<pre class="mono" style="white-space:pre-wrap;word-break:break-all">'+
+      h(state.mfaRecovery.join("\n"))+'</pre>'+
+      '<div class="form-actions"><button data-action="mfa-copy">Скопировать коды</button></div>');
+  }
+  $("view").innerHTML=content;
+  action("Обновить",loadPage);
+}
+
 async function diagnostics(){
   if(!isAdmin())return;
   const [data,history]=await Promise.all([api("/api/v1/ops"),api("/api/v1/history?days=30")]);
@@ -448,6 +489,39 @@ function replayModal(){
     });
 }
 async function perform(actionType,id){
+  if(actionType==="mfa-setup"){
+    const password=$("mfa-password")?.value||"";
+    if(!password)throw new Error("Введите пароль");
+    const result=await api("/api/v1/mfa/setup",{method:"POST",body:{password}});
+    $("mfa-password").value="";
+    state.mfaDraft=result;state.mfaRecovery=null;
+    showMessage("Секрет создан. Подтвердите кодом из приложения.",true);
+    return loadPage();
+  }
+  if(actionType==="mfa-enable"){
+    const code=$("mfa-verify-code")?.value.trim()||"";
+    const result=await api("/api/v1/mfa/enable",{method:"POST",body:{code}});
+    state.mfaDraft=null;state.mfaRecovery=result.recoveryCodes;
+    showMessage("Двухфакторная защита включена. Сохраните резервные коды.",true);
+    return loadPage();
+  }
+  if(actionType==="mfa-copy"){
+    if(state.mfaRecovery?.length){
+      await navigator.clipboard.writeText(state.mfaRecovery.join("\n"));
+      showMessage("Резервные коды скопированы",true);
+    }
+    return;
+  }
+  if(actionType==="mfa-disable"){
+    if(!confirm("Отключить MFA и завершить все активные сеансы?"))return;
+    await api("/api/v1/mfa/disable",{method:"POST",body:{
+      password:$("mfa-disable-password").value,
+      code:$("mfa-disable-code").value.trim()
+    }});
+    if(state.stream)state.stream.close();
+    state.mfaDraft=null;state.mfaRecovery=null;state.user=null;
+    return bootstrap();
+  }
   if(actionType==="detail")return incidentDetail(id);
   if(actionType==="service")return serviceDetail(id);
   if(actionType==="payload"){
@@ -501,12 +575,13 @@ async function perform(actionType,id){
 $("login-form").onsubmit=async(e)=>{
   e.preventDefault();$("login-error").textContent="";
   try{await api("/api/v1/login",{method:"POST",body:{
-    email:$("login-email").value,password:$("login-password").value}});await bootstrap();}
+    email:$("login-email").value,password:$("login-password").value,
+    mfaCode:$("login-mfa").value||null}});$("login-password").value="";$("login-mfa").value="";await bootstrap();}
   catch(error){$("login-error").textContent=error.message;}
 };
 $("logout").onclick=async()=>{
   try{await api("/api/v1/logout",{method:"POST"});}catch(_){}
-  if(state.stream)state.stream.close();state.user=null;await bootstrap();
+  if(state.stream)state.stream.close();state.user=null;state.mfaDraft=null;state.mfaRecovery=null;await bootstrap();
 };
 $("nav").onclick=e=>{
   const btn=e.target.closest(".nav-link");if(btn)navigate(btn.dataset.page);

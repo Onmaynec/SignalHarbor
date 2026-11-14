@@ -9,10 +9,13 @@ from __future__ import annotations
 
 from sqlalchemy import inspect, select, text
 
-from .models import Base, LoginAttempt, MetricHour, SchemaVersion, WorkerStatus, engine
+from .models import (
+    Base, IngestQuota, LoginAttempt, MetricHour, MfaCredential, MfaEnrollment,
+    SchemaVersion, WorkerStatus, engine,
+)
 
 
-LATEST_VERSION = 4
+LATEST_VERSION = 5
 MIGRATIONS = {
     2: [
         # A concurrent worker cannot open two active incidents for one scope.
@@ -27,6 +30,7 @@ MIGRATIONS = {
     ],
     3: [],  # Worker status is created via its versioned SQLAlchemy Table DDL.
     4: [],  # MetricHour and LoginAttempt are versioned tables.
+    5: [],  # TOTP authentication and durable event quotas.
 }
 
 
@@ -57,7 +61,8 @@ def migrate():
                 table for table in Base.metadata.sorted_tables
                 if table.name not in {
                     WorkerStatus.__tablename__, MetricHour.__tablename__,
-                    LoginAttempt.__tablename__,
+                    LoginAttempt.__tablename__, MfaCredential.__tablename__,
+                    MfaEnrollment.__tablename__, IngestQuota.__tablename__,
                 }
             ])
             connection.execute(SchemaVersion.__table__.insert().values(version=1))
@@ -83,5 +88,9 @@ def migrate():
             if version == 4:
                 MetricHour.__table__.create(connection, checkfirst=True)
                 LoginAttempt.__table__.create(connection, checkfirst=True)
+            if version == 5:
+                MfaCredential.__table__.create(connection, checkfirst=True)
+                MfaEnrollment.__table__.create(connection, checkfirst=True)
+                IngestQuota.__table__.create(connection, checkfirst=True)
             connection.execute(SchemaVersion.__table__.insert().values(version=version))
     return LATEST_VERSION

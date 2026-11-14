@@ -18,7 +18,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import and_, exists, func, or_, select, update
+from sqlalchemy import and_, delete, exists, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DBSession
 
@@ -29,13 +29,16 @@ from .auth import (
 )
 from .engine import aware, emit
 from .login_security import begin_login, failed_login, successful_login
+from .mfa import enable as enable_mfa, enrollment as create_mfa_enrollment
+from .mfa import get_credential, verify_factor
+from .quota import reserve_quota
 from .models import (
     Alert, Environment, Event, IngestKey, Incident, Maintenance, Notification,
     Outbox, Postmortem, Rule, RuleRevision, Schedule, Service, Session, SessionLocal,
-    StreamEvent, Team, Timeline, User, WorkerStatus, utcnow,
+    MfaCredential, MfaEnrollment, StreamEvent, Team, Timeline, User, WorkerStatus, utcnow,
 )
 
-app = FastAPI(title="SignalHarbor", version="0.5.0",
+app = FastAPI(title="SignalHarbor", version="0.6.0",
               description="Monitoring, alert correlation and incident response API")
 app.mount("/static", StaticFiles(directory="signalharbor/static"), name="static")
 
@@ -176,6 +179,7 @@ def ready(db: DBSession = Depends(db_session)):
 class LoginBody(BaseModel):
     email: str = Field(min_length=3, max_length=254)
     password: str = Field(min_length=1, max_length=1024)
+    mfaCode: str | None = Field(default=None, max_length=64)
 
 
 # The same password-hashing work is performed for nonexistent/disabled users.
@@ -193,6 +197,12 @@ def login(body: LoginBody, response: Response, db: DBSession = Depends(db_sessio
     password_valid = check_password(body.password, stored_hash)
     if not user or not password_valid:
         failed_login(db, attempt, key)
+    credential = get_credential(db, user.id)
+    if credential is not None:
+        if not body.mfaCode:
+            fail(401, "MFA code required")
+        if not verify_factor(credential, body.mfaCode):
+            failed_login(db, attempt, key)
     successful_login(db, attempt)
     token = create_login(db, user)
     session_cookie(response, token)
@@ -202,6 +212,70 @@ def login(body: LoginBody, response: Response, db: DBSession = Depends(db_sessio
         samesite="strict", path="/",
     )
     return {"id": user.id, "email": user.email, "role": user.role, "teamId": user.team_id}
+
+
+class MfaSetupBody(BaseModel):
+    password: str = Field(min_length=1, max_length=1024)
+
+
+class MfaCodeBody(BaseModel):
+    code: str = Field(min_length=6, max_length=64)
+
+
+class MfaDisableBody(BaseModel):
+    password: str = Field(min_length=1, max_length=1024)
+    code: str = Field(min_length=6, max_length=64)
+
+
+@app.get("/api/v1/mfa/status")
+def mfa_status(user: User = Depends(current_user), db: DBSession = Depends(db_session)):
+    return {
+        "enabled": db.get(MfaCredential, user.id) is not None,
+        "pending": db.get(MfaEnrollment, user.id) is not None,
+    }
+
+
+@app.post("/api/v1/mfa/setup")
+def mfa_setup(body: MfaSetupBody, user: User = Depends(current_user),
+              db: DBSession = Depends(db_session)):
+    if not check_password(body.password, user.password_hash):
+        fail(403, "Invalid credentials")
+    return create_mfa_enrollment(db, user.id, user.email)
+
+
+@app.post("/api/v1/mfa/enable")
+def mfa_enable(body: MfaCodeBody, request: Request,
+               user: User = Depends(current_user),
+               db: DBSession = Depends(db_session)):
+    codes = enable_mfa(db, user.id, body.code)
+    # Existing sessions from other devices were authenticated without MFA.
+    # Invalidate them; preserve this one for account recovery/setup.
+    current_hash = hash_token(request.cookies["signalharbor_session"])
+    db.execute(delete(Session).where(
+        Session.user_id == user.id, Session.token_hash != current_hash,
+    ))
+    db.commit()
+    return {"enabled": True, "recoveryCodes": codes,
+            "note": "Save recovery codes now; they cannot be retrieved later."}
+
+
+@app.post("/api/v1/mfa/disable")
+def mfa_disable(body: MfaDisableBody, response: Response,
+                user: User = Depends(current_user),
+                db: DBSession = Depends(db_session)):
+    if not check_password(body.password, user.password_hash):
+        fail(403, "Invalid credentials")
+    credential = get_credential(db, user.id)
+    if credential is None:
+        fail(409, "MFA is not enabled")
+    if not verify_factor(credential, body.code):
+        fail(403, "Invalid authenticator code")
+    db.delete(credential)
+    db.execute(delete(Session).where(Session.user_id == user.id))
+    db.commit()
+    response.delete_cookie("signalharbor_session")
+    response.delete_cookie("signalharbor_csrf")
+    return {"enabled": False, "reauthenticate": True}
 
 
 @app.post("/api/v1/logout")
@@ -429,7 +503,15 @@ def ingest_auth(request: Request, db: DBSession) -> IngestKey:
     return key
 
 
-def quota_check(key_id: int, units: int):
+def quota_check(db: DBSession, key_id: int, units: int):
+    if db.bind.dialect.name == "postgresql":
+        try:
+            reserve_quota(db, key_id, units, QUOTA)
+        except HTTPException as exc:
+            if exc.status_code == 429:
+                _counters["rejected429"] += 1
+            raise
+        return
     now = time.monotonic()
     if key_id in _buckets:
         start, used = _buckets[key_id]
@@ -539,7 +621,7 @@ def persist(db: DBSession, key: IngestKey, entries: list[IncomingEvent]):
 @app.post("/ingest/v1/events")
 def ingest(batch: EventBatch, request: Request, db: DBSession = Depends(db_session)):
     key = ingest_auth(request, db)
-    quota_check(key.id, len(batch.events))
+    quota_check(db, key.id, len(batch.events))
     return persist(db, key, batch.events)
 
 
@@ -553,7 +635,7 @@ class HeartbeatBody(BaseModel):
 @app.post("/ingest/v1/heartbeat")
 def heartbeat(body: HeartbeatBody, request: Request, db: DBSession = Depends(db_session)):
     key = ingest_auth(request, db)
-    quota_check(key.id, 1)
+    quota_check(db, key.id, 1)
     return persist(db, key, [IncomingEvent(
         eventId=body.eventId, serviceId=body.serviceId, timestamp=body.timestamp,
         severity="info", type="heartbeat",

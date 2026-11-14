@@ -300,3 +300,32 @@ class WorkerStatus(Base):
     processed_count: Mapped[int] = mapped_column(BigInteger, default=0)
     errors_count: Mapped[int] = mapped_column(BigInteger, default=0)
     __table_args__ = (Index("ix_worker_status_seen", "last_seen_at"),)
+
+
+class MfaCredential(Base):
+    """Encrypted TOTP secret and one-time recovery code hashes."""
+
+    __tablename__ = "mfa_credentials"
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    secret_encrypted: Mapped[str] = mapped_column(Text)
+    last_used_step: Mapped[int] = mapped_column(BigInteger, default=-1)
+    recovery_hashes: Mapped[list] = mapped_column(JSON, default=list)
+    enabled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class MfaEnrollment(Base):
+    """Unconfirmed TOTP seed; not usable to authenticate until verified."""
+
+    __tablename__ = "mfa_enrollments"
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    secret_encrypted: Mapped[str] = mapped_column(Text)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class IngestQuota(Base):
+    """Shared fixed-window event quota for each ingest key."""
+
+    __tablename__ = "ingest_quotas"
+    key_id: Mapped[int] = mapped_column(ForeignKey("ingest_keys.id"), primary_key=True)
+    window_started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    used: Mapped[int] = mapped_column(Integer, default=0)

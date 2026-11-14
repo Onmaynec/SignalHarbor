@@ -233,14 +233,17 @@ def test_migration_v3_to_v4_preserves_data(fixture_db):
     with engine.begin() as conn:
         conn.execute(text("DROP TABLE metric_hours"))
         conn.execute(text("DROP TABLE login_attempts"))
-        conn.execute(text("DELETE FROM schema_version WHERE version=4"))
-    assert migrate() == 4
-    assert migrate() == 4
+        conn.execute(text("DROP TABLE mfa_credentials"))
+        conn.execute(text("DROP TABLE mfa_enrollments"))
+        conn.execute(text("DROP TABLE ingest_quotas"))
+        conn.execute(text("DELETE FROM schema_version WHERE version>=4"))
+    assert migrate() == 5
+    assert migrate() == 5
     with SessionLocal() as db:
         assert db.get(WorkerStatus, "worker-keep").processed_count == 99
         assert db.scalars(select(SchemaVersion.version).order_by(
             SchemaVersion.version,
-        )).all() == [1, 2, 3, 4]
+        )).all() == [1, 2, 3, 4, 5]
 
 
 def test_archive_failure_rolls_back_counts_and_raw_deletion(client):
