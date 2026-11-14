@@ -18,10 +18,10 @@ from signalharbor.models import (
 
 
 def test_migration_reentrant_and_index_exists(fixture_db):
-    assert migrate() == 5
-    assert migrate() == 5
+    assert migrate() == 6
+    assert migrate() == 6
     with SessionLocal() as db:
-        assert db.scalars(select(SchemaVersion.version).order_by(SchemaVersion.version)).all() == [1, 2, 3, 4, 5]
+        assert db.scalars(select(SchemaVersion.version).order_by(SchemaVersion.version)).all() == [1, 2, 3, 4, 5, 6]
     with engine.connect() as conn:
         indexes = {row[0] for row in conn.execute(text(
             "SELECT indexname FROM pg_indexes WHERE tablename = 'incidents'"

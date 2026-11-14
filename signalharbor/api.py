@@ -27,7 +27,7 @@ from .auth import (
     ROLES, allow, check_password, create_login, current_user, db_session,
     hash_password, hash_token, require_team, session_cookie, user_from_request,
 )
-from .engine import aware, emit
+from .engine import aware, emit, evaluate, group_watermark
 from .login_security import begin_login, failed_login, successful_login
 from .mfa import enable as enable_mfa, enrollment as create_mfa_enrollment
 from .mfa import get_credential, verify_factor
@@ -38,7 +38,7 @@ from .models import (
     MfaCredential, MfaEnrollment, StreamEvent, Team, Timeline, User, WorkerStatus, utcnow,
 )
 
-app = FastAPI(title="SignalHarbor", version="0.6.0",
+app = FastAPI(title="SignalHarbor", version="0.7.0",
               description="Monitoring, alert correlation and incident response API")
 app.mount("/static", StaticFiles(directory="signalharbor/static"), name="static")
 
@@ -84,6 +84,7 @@ def alert_json(a: Alert):
         "value": a.value, "serviceId": a.service_id, "environmentId": a.environment_id,
         "ruleId": a.rule_id, "ruleVersion": a.rule_version, "incidentId": a.incident_id,
         "suppressed": a.suppressed, "firedAt": iso(a.fired_at),
+        "windowStartAt": iso(a.window_start_at), "windowEndAt": iso(a.window_end_at),
     }
 
 
@@ -723,10 +724,61 @@ def edit_rule(rule_id: int, body: RuleBody, expectedVersion: int,
         fail(404, "Rule not found")
     if rule.version != expectedVersion:
         fail(409, "Rule version changed")
+    previous_version = rule.version
+    previous_configuration = serialize_rule(rule)
+    if db.scalar(select(RuleRevision.id).where(
+        RuleRevision.rule_id == rule.id,
+        RuleRevision.version == previous_version,
+    )) is None:
+        # Preserve the pre-upgrade configuration before its first v0.7 edit.
+        db.add(RuleRevision(
+            rule_id=rule.id, version=previous_version,
+            configuration=previous_configuration, changed_by=user.id,
+        ))
+    previous_identity = (
+        rule.team_id, rule.service_id, rule.environment_id, rule.kind,
+        tuple(rule.group_labels or []),
+    )
     rule.version += 1
     set_rule(rule, body)
     db.add(RuleRevision(rule_id=rule.id, version=rule.version,
                         configuration=body.model_dump(), changed_by=user.id))
+    active_alerts = db.scalars(select(Alert).where(
+        Alert.rule_id == rule.id,
+        Alert.state.in_(["firing", "acknowledged"]),
+    ).with_for_update()).all()
+    next_identity = (
+        rule.team_id, rule.service_id, rule.environment_id, rule.kind,
+        tuple(rule.group_labels or []),
+    )
+    retire_generation = previous_identity != next_identity or not rule.enabled
+    changed_at = utcnow()
+    if retire_generation:
+        reason = "rule_disabled" if not rule.enabled else "rule_scope_or_group_changed"
+        for alert in active_alerts:
+            alert.state = "recovered"
+            alert.healthy_since = changed_at
+            alert.recovered_at = changed_at
+            incident = db.get(Incident, alert.incident_id) if alert.incident_id else None
+            if incident:
+                emit(db, incident, "alert_reconfigured", {
+                    "ruleId": rule.id, "fromVersion": previous_version,
+                    "toVersion": rule.version, "reason": reason,
+                    "fingerprint": alert.fingerprint,
+                }, at=changed_at)
+    else:
+        for alert in active_alerts:
+            watermark = (
+                changed_at if rule.kind == "heartbeat_missing"
+                else group_watermark(
+                    db, rule, alert.service_id, alert.environment_id,
+                    alert.label_values, changed_at,
+                )
+            )
+            evaluate(
+                db, rule, alert.service_id, alert.environment_id,
+                alert.label_values, changed_at, window_end=watermark,
+            )
     db.commit()
     return serialize_rule(rule)
 
@@ -843,11 +895,41 @@ def events(after: datetime | None = None, before: datetime | None = None,
         if not alert:
             return {"items": [], "nextCursor": None}
         svc = db.get(Service, alert.service_id)
+        if svc is None:
+            return {"items": [], "nextCursor": None}
         require_team(user, svc.team_id)
+        rule = db.get(Rule, alert.rule_id)
+        if rule is None:
+            return {"items": [], "nextCursor": None}
+        revision = db.scalar(select(RuleRevision).where(
+            RuleRevision.rule_id == alert.rule_id,
+            RuleRevision.version == alert.rule_version,
+        ))
+        configuration = revision.configuration if revision else {}
+        rule_kind = configuration.get("kind", rule.kind)
+        window_seconds = int(configuration.get("windowSeconds", rule.window_seconds))
         q = q.where(Event.service_id == alert.service_id,
                     Event.environment_id == alert.environment_id)
+        window_end = aware(alert.window_end_at or alert.fired_at)
+        if rule_kind == "heartbeat_missing":
+            # The last heartbeat may predate the rule's threshold interval.
+            q = q.where(Event.kind == "heartbeat", Event.occurred_at <= window_end)
+        else:
+            window_start = aware(
+                alert.window_start_at
+                or (alert.fired_at - timedelta(seconds=window_seconds))
+            )
+            q = q.where(
+                Event.late.is_(False),
+                Event.occurred_at >= window_start,
+                Event.occurred_at <= window_end,
+            )
+            if rule_kind == "count_error":
+                q = q.where(or_(Event.kind == "error", Event.severity == "error"))
         for label, value in alert.label_values.items():
-            q = q.where(Event.labels[label].as_string() == str(value))
+            q = q.where(
+                func.coalesce(Event.labels[label].as_string(), "") == str(value)
+            )
     if cursor:
         try:
             raw = json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())

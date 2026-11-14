@@ -159,6 +159,8 @@ class Alert(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     healthy_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     recovered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    window_start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    window_end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     suppressed: Mapped[bool] = mapped_column(Boolean, default=False)
     label_values: Mapped[dict] = mapped_column(JSON, default=dict)
 

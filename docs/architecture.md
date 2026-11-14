@@ -16,7 +16,7 @@ teams, users, sessions, services, environments, ingest_keys, ingest_events, outb
 
 Дедупликация: UNIQUE(key_id,event_id). Fingerprint: SHA-256 от [serviceId, environmentId, ruleId, отсортированные пары выбранных labels]. Активный инцидент ищется по service + environment + team. В PostgreSQL используется pg_advisory_xact_lock по environment_id до поиска первого инцидента, а частичный уникальный индекс не допускает два незакрытых incident одного scope. Это политика агрегации текущей версии (все активные alerts одного сервиса и среды попадают в один incident).
 
-Временные значения записываются в UTC. Бounded out-of-order события (не старше 120 секунд относительно получения) при evaluation используют event-time watermark выбранной группы: максимальный timestamp её уже записанных допустимых событий. Это позволяет учесть 90-секундную задержку даже в 30-секундном окне. Для активных alert и recovery периодическая проверка каждые 2 секунды выполняется по времени worker. Слишком поздние события (>120 секунд) сохраняются с late=true и не запускают rule-engine. События с допустимым будущим timestamp остаются pending в durable outbox до наступления timestamp.
+Временные значения записываются в UTC. Bounded out-of-order события (не старше 120 секунд относительно получения) при evaluation используют event-time watermark выбранной группы service/environment/rule/selected labels: максимальный timestamp уже записанного допустимого события. Watermark не зависит от того, пришёл ли старый пакет до нового или после него; окно строится относительно watermark, а не времени получения. Это позволяет учесть 90-секундную задержку даже в 30-секундном окне. Отсутствующая выбранная label нормализуется в пустую строку одинаково в fingerprint, watermark и SQL-фильтре окна. Слишком поздние события (>120 секунд) сохраняются с late=true и не запускают rule-engine. События с допустимым будущим timestamp остаются pending в durable outbox до наступления timestamp. Для active alert и recovery периодическая проверка каждые 2 секунды выполняется по времени worker.
 
 ## Достоверность и конкуренция
 
@@ -34,6 +34,16 @@ ACK реализован одним условным UPDATE по состоян�
 - recovery: threshold больше не превышен непрерывно recoverySeconds.
 - cooldown: пауза между recovered и новым firing.
 - maintenance: события и alert сохраняются, но mock уведомления подавляются.
+
+## Event-time, поколения alert и fingerprint query
+
+Для каждой оценки alert сохраняются `window_start_at` и `window_end_at`: фактические границы event-time окна, использованного для вычисления значения. GET `/api/v1/events?fingerprint=...` применяет scope service/environment, сохранённые label values, точные границы окна и семантику rule из версии `RuleRevision`: `count_error` возвращает только error events (`kind=error` или `severity=error`), `error_rate` — все события знаменателя, `heartbeat_missing` — heartbeat до конца интервала. Это не смешивает одинаковые service/environment/labels у правил разных типов или окон. Для отсутствующих labels применяется `COALESCE(..., '')`, поэтому SQL-группировка совпадает с построением fingerprint.
+
+Изменение порога, окна, cooldown, recovery или severity при неизменных service/environment/kind/groupLabels повышает `rule_version` и сразу переоценивает активные alert; смена scope, kind, selected labels или выключение правила завершает прежнее поколение alert с timeline-событием `alert_reconfigured`. Старый alert сохраняет свою версию и fingerprint. При первом редактировании legacy-правила перед новой ревизией фиксируется его прежняя конфигурация, если записи истории ещё нет.
+
+Hysteresis требует непрерывного периода ниже порога. Если событие во время cooldown снова превышает порог, alert не открывается немедленно; после истечения cooldown периодический evaluator проверяет recovered alert текущей версии по признаку `last_seen_at > recovered_at`. Если условие всё ещё выполняется, создаётся `refired`; recovered alert без нового firing-сигнала не опрашиваются постоянно. Старые поколения, закрытые изменением grouping/scope, не переоткрываются periodic scan.
+
+Значения: для `count_error` `value` — число ошибок и `count` — число ошибок; для `error_rate` `value` — процент ошибок, `count` — число error events в окне; для `heartbeat_missing` `value` — секунды после последнего heartbeat, `count=1`. `window_start_at/window_end_at` фиксируют фактическое окно, а `fired_at` остаётся временем перехода alert в firing.
 
 ## Политика хранения и защита входа
 
@@ -61,10 +71,10 @@ Replay по POST /api/v1/replay вычисляет переходы в памя�
 
 Страница /status отдает только название и операционный статус явно разрешённых PUBLIC_STATUS_SERVICE_IDS. По умолчанию список пуст.
 
-## Ограничения v0.6.0
+## Ограничения v0.7.0
 
 - Нет отдельного queue broker; ingest quota синхронизируется через PostgreSQL per key, но IP/network throttling на reverse proxy пока не реализован.
-- Версия схемы v5 добавляет `mfa_credentials`, `mfa_enrollments` и `ingest_quotas`; последующие изменения должны оформляться отдельными миграциями.
+- Версия схемы v5 добавляет `mfa_credentials`, `mfa_enrollments` и `ingest_quotas`; v6 добавляет `alerts.window_start_at` и `alerts.window_end_at` для сохранения границ event-time окна. Последующие изменения должны оформляться отдельными миграциями.
 - Для аналитики за пределами raw retention доступны только почасовые агрегаты per team/service/environment, без отдельных labels и payload. Накопительная свёртка транзакционная; нагрузочный прогон массовой архивной очистки ещё не подтверждён.
 - Записи в timeline не имеют отдельной политики запрета SQL UPDATE на уровне роли БД (append-only обеспечено API).
 - Replay simulator доступен, но проверенный fault-injection с kill/restart контейнеров пока не проведён.

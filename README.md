@@ -2,8 +2,8 @@
 
 Система мониторинга сервисов, корреляции алертов и управления инцидентами. Демонстрационная реализация по техническому заданию PV-OPS-04.
 
-**Статус: v0.6.0 — Production Hardening. Приёмка по PV-OPS-04 ещё не завершена.**
-В репозитории реализован сквозной путь ingest → durable PostgreSQL → outbox → rule worker → alert → incident → mock inbox → UI. Отдельные ограничения и невыполненные испытания описаны в [протоколе приёмки](docs/acceptance.md). Подробности v0.6.0 — в [CHANGELOG](CHANGELOG.md).
+**Статус: v0.7.0 — Event-Time Detection & Alert Accuracy. Приёмка по PV-OPS-04 ещё не завершена.**
+В репозитории реализован сквозной путь ingest → durable PostgreSQL → outbox → rule worker → alert → incident → mock inbox → UI. Отдельные ограничения и невыполненные испытания описаны в [протоколе приёмки](docs/acceptance.md). В v0.7.0 уточнена event-time корреляция, фильтрация событий по fingerprint и жизненный цикл активных alert при изменении правил. Подробности — в [CHANGELOG](CHANGELOG.md).
 
 ## Быстрый запуск
 

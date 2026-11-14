@@ -214,18 +214,36 @@ def test_parallel_quota_reservations_are_serialized(fixture_db):
         assert db.scalar(select(IngestQuota.used)) == 10
 
 
-def test_migration_v4_to_v5_preserves_worker(fixture_db):
+def test_migration_v4_to_v6_preserves_worker_and_alerts(fixture_db):
     with SessionLocal.begin() as db:
         db.add(WorkerStatus(id="old-worker", processed_count=17, errors_count=1))
+        legacy_alert = Alert(
+            fingerprint="c" * 64, rule_id=1, rule_version=1,
+            service_id=1, environment_id=1, state="firing",
+            count=3, value=3, fired_at=utcnow(), last_seen_at=utcnow(),
+            label_values={},
+        )
+        db.add(legacy_alert)
+        db.flush()
+        legacy_alert_id = legacy_alert.id
     with engine.begin() as conn:
+        conn.execute(text("DROP TABLE metric_hours"))
+        conn.execute(text("DROP TABLE login_attempts"))
         conn.execute(text("DROP TABLE mfa_credentials"))
         conn.execute(text("DROP TABLE mfa_enrollments"))
         conn.execute(text("DROP TABLE ingest_quotas"))
-        conn.execute(text("DELETE FROM schema_version WHERE version=5"))
-    assert migrate() == 5
-    assert migrate() == 5
+        conn.execute(text("ALTER TABLE alerts DROP COLUMN window_start_at"))
+        conn.execute(text("ALTER TABLE alerts DROP COLUMN window_end_at"))
+        conn.execute(text("DELETE FROM schema_version WHERE version>=4"))
+    assert migrate() == 6
+    assert migrate() == 6
     with SessionLocal() as db:
         assert db.get(WorkerStatus, "old-worker").processed_count == 17
+        migrated_alert = db.get(Alert, legacy_alert_id)
+        assert migrated_alert is not None
+        assert migrated_alert.count == 3
+        assert migrated_alert.window_start_at is None
+        assert migrated_alert.window_end_at is None
         assert db.scalars(select(SchemaVersion.version).order_by(
             SchemaVersion.version,
-        )).all() == [1, 2, 3, 4, 5]
+        )).all() == [1, 2, 3, 4, 5, 6]

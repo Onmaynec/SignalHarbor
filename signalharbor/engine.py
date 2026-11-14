@@ -81,7 +81,9 @@ def measure(db: Session, rule: Rule, service_id: int, env_id: int,
         Event.late.is_(False),
     ]
     for key, value in group_values.items():
-        conditions.append(Event.labels[key].as_string() == str(value))
+        # Missing selected labels are represented by the empty-string group.
+        # COALESCE keeps SQL matching identical to fingerprint construction.
+        conditions.append(func.coalesce(Event.labels[key].as_string(), "") == str(value))
     if rule.kind == "heartbeat_missing":
         env = db.get(Environment, env_id)
         last = aware(env.last_heartbeat_at) if env and env.last_heartbeat_at else None
@@ -136,11 +138,25 @@ def evaluate(db: Session, rule: Rule, service_id: int, env_id: int,
         # UNIQUE index remains the final line of defence against duplicates.
         lock_key = int.from_bytes(bytes.fromhex(fp)[:4], "big", signed=True)
         db.execute(text("SELECT pg_advisory_xact_lock(139725, :key)"), {"key": lock_key})
+    effective_end = aware(window_end or now)
+    effective_start = effective_end - timedelta(seconds=rule.window_seconds)
     value, occurrences = measure(
-        db, rule, service_id, env_id, values, window_end or now,
+        db, rule, service_id, env_id, values, effective_end,
     )
     firing = (value >= rule.threshold) if rule.kind == "heartbeat_missing" else (value > rule.threshold)
     alert = db.scalar(select(Alert).where(Alert.fingerprint == fp).with_for_update())
+    if alert:
+        previous_version = alert.rule_version
+        alert.rule_version = rule.version
+        alert.window_start_at = effective_start
+        alert.window_end_at = effective_end
+        if previous_version != rule.version and alert.incident_id:
+            incident = db.get(Incident, alert.incident_id)
+            if incident and alert.state in ("firing", "acknowledged"):
+                emit(db, incident, "alert_rule_updated", {
+                    "ruleId": rule.id, "fromVersion": previous_version,
+                    "toVersion": rule.version,
+                }, at=now)
     if firing:
         if alert:
             alert.value = value
@@ -161,7 +177,8 @@ def evaluate(db: Session, rule: Rule, service_id: int, env_id: int,
                 fingerprint=fp, rule_id=rule.id, rule_version=rule.version,
                 service_id=service_id, environment_id=env_id, state="firing",
                 value=value, count=occurrences, fired_at=now, last_seen_at=now,
-                label_values=values,
+                label_values=values, window_start_at=effective_start,
+                window_end_at=effective_end,
             )
             db.add(alert)
             db.flush()
@@ -182,6 +199,24 @@ def evaluate(db: Session, rule: Rule, service_id: int, env_id: int,
             incident = db.get(Incident, alert.incident_id) if alert.incident_id else None
             if incident:
                 emit(db, incident, "alert_recovered", {"fingerprint": fp}, at=now)
+
+
+def group_watermark(db: Session, rule: Rule, service_id: int, env_id: int,
+                    values: dict, now: datetime) -> datetime:
+    """Return the latest eligible event-time point for one rule fingerprint."""
+    conditions = [
+        Event.service_id == service_id,
+        Event.environment_id == env_id,
+        Event.late.is_(False),
+        Event.occurred_at <= now,
+        Event.occurred_at >= now - timedelta(seconds=rule.window_seconds + 120),
+    ]
+    for name, value in values.items():
+        conditions.append(
+            func.coalesce(Event.labels[name].as_string(), "") == str(value)
+        )
+    watermark = db.scalar(select(func.max(Event.occurred_at)).where(*conditions))
+    return aware(watermark) if watermark else aware(now)
 
 
 def process_event(db: Session, event: Event, now: datetime | None = None,
@@ -205,19 +240,10 @@ def process_event(db: Session, event: Event, now: datetime | None = None,
         values = {name: str(event.labels.get(name, "")) for name in rule.group_labels}
         # Event-time watermark for bounded out-of-order arrivals. Never rewind
         # the group to a stale event after a newer event has been committed.
-        filter_by_group = [
-            Event.service_id == event.service_id,
-            Event.environment_id == event.environment_id,
-            Event.late.is_(False),
-            Event.occurred_at <= now,
-            Event.occurred_at >= now - timedelta(seconds=rule.window_seconds + 120),
-        ]
-        for name, value in values.items():
-            filter_by_group.append(Event.labels[name].as_string() == value)
-        watermark = db.scalar(select(func.max(Event.occurred_at)).where(*filter_by_group))
+        watermark = group_watermark(db, rule, event.service_id, event.environment_id,
+                                    values, now)
         evaluate(db, rule, event.service_id, event.environment_id, values, now,
-                 window_end=aware(watermark) if watermark else now,
-                 source_received_at=event.received_at)
+                 window_end=watermark, source_received_at=event.received_at)
 
 
 def drain_outbox(batch_size: int = 100, now: datetime | None = None) -> int:
@@ -303,10 +329,21 @@ def scan_health(now: datetime | None = None):
             else:
                 # Continue evaluating active alerts even when new events stop arriving.
                 alerts = db.scalars(select(Alert).where(
-                    Alert.rule_id == rule.id, Alert.state.in_(["firing", "acknowledged"]),
+                    Alert.rule_id == rule.id,
+                    or_(
+                        Alert.state.in_(["firing", "acknowledged"]),
+                        (
+                            (Alert.state == "recovered")
+                            & (Alert.rule_version == rule.version)
+                            & Alert.recovered_at.is_not(None)
+                            & (Alert.last_seen_at > Alert.recovered_at)
+                            & (Alert.recovered_at <= now - timedelta(seconds=rule.cooldown_seconds))
+                        ),
+                    ),
                 )).all()
                 for alert in alerts:
-                    evaluate(db, rule, alert.service_id, alert.environment_id, alert.label_values, now)
+                    evaluate(db, rule, alert.service_id, alert.environment_id,
+                             alert.label_values, now)
 
 
 def scan_escalations(now: datetime | None = None, delay_seconds: int = 300):

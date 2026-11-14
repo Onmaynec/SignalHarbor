@@ -43,16 +43,16 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: Publish v0.6.0
+      - name: Publish v0.7.0
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if gh release view v0.6.0 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release v0.6.0 already exists"
+          if gh release view v0.7.0 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release v0.7.0 already exists"
             exit 0
           fi
-          gh release create v0.6.0 \
+          gh release create v0.7.0 \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "SignalHarbor v0.6.0 — Production Hardening" \
-            --notes-file docs/releases/v0.6.0.md
+            --title "SignalHarbor v0.7.0 — Event-Time Detection & Alert Accuracy" \
+            --notes-file docs/releases/v0.7.0.md

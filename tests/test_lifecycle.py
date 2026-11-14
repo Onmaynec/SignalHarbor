@@ -227,7 +227,7 @@ def test_concurrent_failed_logins_count_every_attempt(fixture_db):
         assert attempts[0].failures == 2
 
 
-def test_migration_v3_to_v4_preserves_data(fixture_db):
+def test_migration_v3_to_v6_preserves_data(fixture_db):
     with SessionLocal.begin() as db:
         db.add(WorkerStatus(id="worker-keep", processed_count=99, errors_count=3))
     with engine.begin() as conn:
@@ -236,14 +236,16 @@ def test_migration_v3_to_v4_preserves_data(fixture_db):
         conn.execute(text("DROP TABLE mfa_credentials"))
         conn.execute(text("DROP TABLE mfa_enrollments"))
         conn.execute(text("DROP TABLE ingest_quotas"))
+        conn.execute(text("ALTER TABLE alerts DROP COLUMN window_start_at"))
+        conn.execute(text("ALTER TABLE alerts DROP COLUMN window_end_at"))
         conn.execute(text("DELETE FROM schema_version WHERE version>=4"))
-    assert migrate() == 5
-    assert migrate() == 5
+    assert migrate() == 6
+    assert migrate() == 6
     with SessionLocal() as db:
         assert db.get(WorkerStatus, "worker-keep").processed_count == 99
         assert db.scalars(select(SchemaVersion.version).order_by(
             SchemaVersion.version,
-        )).all() == [1, 2, 3, 4, 5]
+        )).all() == [1, 2, 3, 4, 5, 6]
 
 
 def test_archive_failure_rolls_back_counts_and_raw_deletion(client):

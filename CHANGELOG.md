@@ -1,5 +1,30 @@
 # История версий
 
+## v0.7.0 — Event-Time Detection & Alert Accuracy
+
+### Event-time и группировка
+- Согласована обработка отсутствующих selected labels: пустое значение одинаково используется при fingerprint, выборе watermark и SQL-агрегации.
+- Добавлены фиксированные timestamp сценарии короткого окна, проверяющие одинаковый итог при поступлении старых и новых событий в обратном порядке.
+- Каждая оценка alert сохраняет `window_start_at` и `window_end_at`; миграция v5→v6 добавляет поля в таблицу alerts.
+
+### Точный fingerprint query
+- `/api/v1/events?fingerprint=...` ограничивает выборку service/environment, label values и сохранённым event-time окном.
+- Историческая конфигурация `count_error` возвращает только ошибки, `error_rate` — все события окна, `heartbeat_missing` — heartbeat до конца интервала.
+- Перед первым редактированием legacy-правила сохраняется его предыдущая конфигурация в `rule_revisions`, если снимка ещё не было.
+
+### Rule lifecycle и flapping
+- Изменения порога/окна/cooldown/recovery/severity при неизменной группе сразу переоценивают активные alert и обновляют `rule_version`.
+- Смена scope/kind/groupLabels или отключение правила завершает прежнее поколение alert с `alert_reconfigured`.
+- Если событие во время cooldown снова подняло значение выше порога, периодический evaluator повторно проверяет recovered alert после cooldown; при сохраняющемся условии создаётся `refired`. Старые recovered alert без такого события не опрашиваются постоянно.
+- Добавлены сценарии смешанных error/heartbeat и независимого восстановления.
+
+### Миграции и проверки
+- Миграция схемы v5→v6 добавляет nullable event-time границы alert; старые записи используют fallback до следующей оценки.
+- Новые интеграционные проверки на порядок доставки, missing labels, rule-specific fingerprint, версионирование активного alert, смену группировки и cooldown.
+- Нагрузочный SLO 2000 events/min, fault-injection реального рестарта и полная приёмка остаются открытыми.
+
+---
+
 ## v0.6.0 — Production Hardening
 
 ### TOTP MFA

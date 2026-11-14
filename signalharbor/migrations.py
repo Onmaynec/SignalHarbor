@@ -15,7 +15,7 @@ from .models import (
 )
 
 
-LATEST_VERSION = 5
+LATEST_VERSION = 6
 MIGRATIONS = {
     2: [
         # A concurrent worker cannot open two active incidents for one scope.
@@ -31,6 +31,7 @@ MIGRATIONS = {
     3: [],  # Worker status is created via its versioned SQLAlchemy Table DDL.
     4: [],  # MetricHour and LoginAttempt are versioned tables.
     5: [],  # TOTP authentication and durable event quotas.
+    6: [],  # Persist exact event-time bounds for each alert evaluation.
 }
 
 
@@ -92,5 +93,20 @@ def migrate():
                 MfaCredential.__table__.create(connection, checkfirst=True)
                 MfaEnrollment.__table__.create(connection, checkfirst=True)
                 IngestQuota.__table__.create(connection, checkfirst=True)
+            if version == 6:
+                alert_columns = {
+                    column["name"] for column in inspect(connection).get_columns("alerts")
+                }
+                timestamp_type = (
+                    "TIMESTAMPTZ" if engine.dialect.name == "postgresql" else "DATETIME"
+                )
+                if "window_start_at" not in alert_columns:
+                    connection.execute(text(
+                        f"ALTER TABLE alerts ADD COLUMN window_start_at {timestamp_type}"
+                    ))
+                if "window_end_at" not in alert_columns:
+                    connection.execute(text(
+                        f"ALTER TABLE alerts ADD COLUMN window_end_at {timestamp_type}"
+                    ))
             connection.execute(SchemaVersion.__table__.insert().values(version=version))
     return LATEST_VERSION

@@ -1,4 +1,4 @@
-# Протокол приёмки PV-OPS-04 — v0.6.0
+# Протокол приёмки PV-OPS-04 — v0.7.0
 
 **Это журнал проверок, не акт сдачи.** Состояния: «автоматизирован частично» — есть тест на ключевой инвариант; «не подтверждено» — испытание и его результаты отсутствуют.
 
@@ -6,10 +6,10 @@
 | --- | --- | --- |
 | AT-01 | 5 повторов одного eventId | Автоматизирован: test_at01_duplicate_event_id |
 | AT-02 | Невалидный и oversized batch | Автоматизирован: test_at02_validation_and_quota |
-| AT-03 | 40 ошибок при пороге 20 | Автоматизирован: test_at03_at04_one_alert_and_one_incident |
+| AT-03 | 40 ошибок при пороге 20 | Автоматизирован: test_at03_at04_one_alert_and_one_incident; короткое окно и обратный порядок доставки — test_short_window_result_is_independent_of_delivery_order |
 | AT-04 | Рост count без роста числа incidents | Автоматизирован частично; нет реального 5-минутного soak |
-| AT-05 | Прекращение heartbeat | Автоматизирован с управлением временем: test_at05_heartbeat_missing_alert |
-| AT-06 | 30 сек восстановления не даёт recovered | Автоматизирован с управлением временем в test_at06_hysteresis_and_at07_at08_escalation |
+| AT-05 | Прекращение heartbeat | Автоматизирован с управлением временем: test_at05_heartbeat_missing_alert; независимое восстановление error/heartbeat правил — test_error_and_heartbeat_rules_recover_independently |
+| AT-06 | 30 сек восстановления не даёт recovered | Автоматизирован с управлением временем в test_at06_hysteresis_and_at07_at08_escalation; cooldown повторно оценивает recovered alert — test_cooldown_rechecks_a_recovered_alert_without_new_ingest |
 | AT-07 | Одна L2 через 5 минут | Автоматизирован с управлением временем |
 | AT-08 | Рестарт worker не дублирует L2 | Ограничено повторным вызовом worker-функции; реальный restart не подтверждён |
 | AT-09 | Maintenance оставляет событие, но подавляет уведомление | Автоматизирован: test_at09_maintenance_suppresses_notification_not_history |
@@ -17,7 +17,7 @@
 | AT-11 | SSE reconnect catch-up | Автоматизирована проверка курсора и командного ограничения через streaming generator; сетевой E2E reconnect ещё не подтверждён |
 | AT-12 | Postmortem и MTTA/MTTR по timeline | Автоматизирован частично: test_ack_idempotent_team_isolation_postmortem_metrics |
 
-Дополнительно реализованы негативные проверки RBAC, чужого serviceId, CSRF, late event, dry-run replay без записей и уведомлений, Markdown-export postmortem и статистических серий. В v0.2.0 добавлены тесты миграции v1→v2, уникальности активного инцидента, параллельного создания инцидента двумя worker и retention с pending outbox. В v0.3.0 дополнительно автоматизированы опоздавшие события в коротком event-time окне, отложенная обработка будущих событий, фильтры разных fingerprints, метрики очереди, SSE cursor/права и отзыв сессии. В v0.4.0 добавлены проверки пакетной корреляции (сотни записей — одна оценка правила), независимых групп labels, отката при injected failure, параллельного drain двух worker, heartbeat worker и разделения ready/deferred outbox. В v0.5.0 расширено покрытие: транзакционная raw→hourly архивация без повторного счёта, 180-дневная очистка агрегатов, 365-дневная очистка закрытых инцидентов с FK-зависимостями, RBAC исторической статистики, throttling входа и конкурентные ошибки авторизации, обновление схемы v3→v4. В v0.6.0 добавлены тесты MFA enrollment/login/recovery/disable, повторного TOTP, отсутствующего encryption key, отзыва чужих сеансов, PostgreSQL-backed ingest quota под конкуренцией, транзакционного rollback квоты и миграции v4→v5. Интеграционные тесты требуют отдельной PostgreSQL БД `signalharbor_test`.
+Дополнительно реализованы негативные проверки RBAC, чужого serviceId, CSRF, late event, dry-run replay без записей и уведомлений, Markdown-export postmortem и статистических серий. В v0.2.0 добавлены тесты миграции v1→v2, уникальности активного инцидента, параллельного создания инцидента двумя worker и retention с pending outbox. В v0.3.0 дополнительно автоматизированы опоздавшие события в коротком event-time окне, отложенная обработка будущих событий, фильтры разных fingerprints, метрики очереди, SSE cursor/права и отзыв сессии. В v0.4.0 добавлены проверки пакетной корреляции (сотни записей — одна оценка правила), независимых групп labels, отката при injected failure, параллельного drain двух worker, heartbeat worker и разделения ready/deferred outbox. В v0.5.0 расширено покрытие: транзакционная raw→hourly архивация без повторного счёта, 180-дневная очистка агрегатов, 365-дневная очистка закрытых инцидентов с FK-зависимостями, RBAC исторической статистики, throttling входа и конкурентные ошибки авторизации, обновление схемы v3→v4. В v0.6.0 добавлены тесты MFA enrollment/login/recovery/disable, повторного TOTP, отсутствующего encryption key, отзыва чужих сеансов, PostgreSQL-backed ingest quota под конкуренцией, транзакционного rollback квоты и миграции v4→v5. В v0.7.0 добавлены фиксированные timestamp сценарии обратного порядка доставки в коротком окне, нормализация отсутствующих labels, фильтрация fingerprint с учётом rule kind и сохранённого временного окна, обновление rule_version активного alert, закрытие поколения alert при смене grouping, cooldown повторная оценка и чередование error/heartbeat. Миграция v5→v6 добавляет window_start_at/window_end_at для точного event query. Интеграционные тесты требуют отдельной PostgreSQL БД `signalharbor_test`.
 
 ## Блокеры полной приёмки
 
