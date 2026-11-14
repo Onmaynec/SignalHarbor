@@ -17,7 +17,7 @@ from signalharbor.auth import hash_token
 from signalharbor.mfa import encrypt_secret, hotp, new_secret, verify_factor
 from signalharbor.migrations import migrate
 from signalharbor.models import (
-    Event, IngestQuota, MfaCredential, MfaEnrollment, Outbox, SchemaVersion,
+    Alert, Event, IngestQuota, MfaCredential, MfaEnrollment, Outbox, SchemaVersion,
     Session, SessionLocal, User, WorkerStatus, engine, utcnow,
 )
 from signalharbor.quota import reserve_quota
