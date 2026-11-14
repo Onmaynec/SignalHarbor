@@ -241,3 +241,15 @@ def test_postgres_bulk_handles_duplicates_in_same_batch(client):
     with SessionLocal() as db:
         assert db.scalar(select(func.count(Event.id))) == 499
         assert db.scalar(select(func.count(Outbox.id))) == 499
+
+
+def test_demo_seed_is_repeatable_and_provisions_oncall(client):
+    from signalharbor.manage import demo
+    from signalharbor.models import Schedule, Service
+    demo(80, seed_value=1337)
+    demo(80, seed_value=1337)
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count(Event.id)).where(
+            Event.event_id.like("demo-1337-%"))) == 80
+        assert db.scalar(select(func.count(Service.id))) == 41
+        assert db.scalar(select(func.count(Schedule.id))) == 5

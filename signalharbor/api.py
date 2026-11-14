@@ -920,7 +920,8 @@ def postmortem(id: int, body: PostmortemBody,
     i = get_incident(db, user, id)
     pm = db.scalar(select(Postmortem).where(Postmortem.incident_id == id).with_for_update())
     if not pm:
-        pm = Postmortem(incident_id=id, created_by=user.id)
+        pm = Postmortem(incident_id=id, created_by=user.id, impact=body.impact,
+                        root_cause=body.rootCause, action_items=body.actionItems)
         db.add(pm)
     for item in body.actionItems:
         owner_id = item.get("ownerId")

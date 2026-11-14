@@ -8,11 +8,11 @@ import random
 import secrets
 from datetime import timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from .auth import hash_password, hash_token
 from .models import (
-    Base, Environment, Event, IngestKey, Maintenance, Rule, SchemaVersion,
+    Base, Environment, Event, IngestKey, Maintenance, Rule, Schedule, SchemaVersion,
     Service, SessionLocal, Team, User, engine, utcnow,
 )
 
@@ -102,6 +102,14 @@ def demo(count: int, seed_value: int):
                         raise SystemExit("ADMIN_PASSWORD required for demo")
                     db.add(User(email=email, password_hash=hash_password(password),
                                 team_id=t.id, role=role))
+        db.flush()
+        for n, t in enumerate(teams, 1):
+            oncall = db.scalar(select(User).where(User.email == "oncall" + str(n) + "@signalharbor.local"))
+            backup = db.scalar(select(User).where(User.email == "engineer" + str(n) + "@signalharbor.local"))
+            schedule = db.scalar(select(Schedule).where(Schedule.team_id == t.id))
+            if not schedule and oncall and backup:
+                db.add(Schedule(team_id=t.id, timezone="UTC", primary_id=oncall.id,
+                                backup_id=backup.id, rotation_minutes=10080, starts_at=now))
         first_env_id = envs[0][1]
         exists = db.scalar(select(Maintenance.id).where(
             Maintenance.environment_id == first_env_id))
@@ -109,7 +117,10 @@ def demo(count: int, seed_value: int):
             db.add(Maintenance(environment_id=first_env_id,
                                starts_at=now - timedelta(hours=4),
                                ends_at=now - timedelta(hours=3), reason="Historical maintenance"))
-    total = 0
+    with SessionLocal() as db:
+        total = db.scalar(select(func.count(Event.id)).where(
+            Event.event_id.like("demo-" + str(seed_value) + "-%"),
+        )) or 0
     while total < count:
         rows = []
         batch = min(1000, count - total)
