@@ -465,7 +465,7 @@ def persist(db: DBSession, key: IngestKey, entries: list[IncomingEvent]):
         if item.type == "heartbeat":
             if env.last_heartbeat_at is None or aware(env.last_heartbeat_at) < occurred:
                 env.last_heartbeat_at = occurred
-        else:
+        elif not event.late:
             db.add(Outbox(kind="ingest", subject_id=event.id))
     db.commit()  # Only after durable DB commit can HTTP success be returned.
     _counters["ingestBatches"] += 1
