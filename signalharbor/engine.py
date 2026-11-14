@@ -10,7 +10,7 @@ import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, exists, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from .models import (
@@ -100,6 +100,9 @@ def measure(db: Session, rule: Rule, service_id: int, env_id: int,
 
 def ensure_incident(db: Session, rule: Rule, service_id: int, env_id: int,
                     now: datetime, alert: Alert) -> Incident:
+    if db.bind.dialect.name == "postgresql":
+        # Serialize the first insert per environment, even when no row exists.
+        db.execute(text("SELECT pg_advisory_xact_lock(139724, :scope)"), {"scope": env_id})
     incident = db.scalar(select(Incident).where(
         Incident.team_id == rule.team_id,
         Incident.service_id == service_id,
@@ -240,14 +243,18 @@ def scan_escalations(now: datetime | None = None, delay_seconds: int = 300):
 
 
 def retention(now: datetime | None = None):
-    from sqlalchemy import delete
-    from .models import SessionLocal, StreamEvent
+    from .models import Session as UserSession, SessionLocal, StreamEvent
     now = now or utcnow()
+    cutoff = now - timedelta(days=30)
     with SessionLocal.begin() as db:
-        # Ingest idempotency is retained for at least 30 days, not just 7.
-        db.execute(delete(Outbox).where(
-            Outbox.processed_at.is_not(None),
-            Outbox.processed_at < now - timedelta(days=30),
+        # Do not remove a durable event while its corresponding outbox job is pending.
+        pending = exists(select(Outbox.id).where(
+            Outbox.kind == "ingest", Outbox.subject_id == Event.id,
+            Outbox.processed_at.is_(None),
         ))
-        db.execute(delete(Event).where(Event.received_at < now - timedelta(days=30)))
-        db.execute(delete(StreamEvent).where(StreamEvent.created_at < now - timedelta(days=30)))
+        db.execute(delete(Event).where(Event.received_at < cutoff, ~pending))
+        db.execute(delete(Outbox).where(
+            Outbox.processed_at.is_not(None), Outbox.processed_at < cutoff,
+        ))
+        db.execute(delete(StreamEvent).where(StreamEvent.created_at < cutoff))
+        db.execute(delete(UserSession).where(UserSession.expires_at < now))

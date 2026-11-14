@@ -11,19 +11,11 @@ from datetime import timedelta
 from sqlalchemy import func, select
 
 from .auth import hash_password, hash_token
+from .migrations import migrate
 from .models import (
-    Base, Environment, Event, IngestKey, Maintenance, Rule, Schedule, SchemaVersion,
-    Service, SessionLocal, Team, User, engine, utcnow,
+    Environment, Event, IngestKey, Maintenance, Rule, Schedule,
+    Service, SessionLocal, Team, User, utcnow,
 )
-
-
-def migrate():
-    Base.metadata.create_all(engine)
-    with SessionLocal.begin() as db:
-        v = db.get(SchemaVersion, 1)
-        if not v:
-            db.add(SchemaVersion(version=1))
-    print("Schema baseline v1 ready")
 
 
 def seed():
@@ -154,7 +146,8 @@ if __name__ == "__main__":
     p.add_argument("--seed", type=int, default=42)
     opts = p.parse_args()
     if opts.action == "migrate":
-        migrate()
+        version = migrate()
+        print(f"Database schema v{version} ready")
     elif opts.action == "seed":
         seed()
     elif opts.action == "demo":

@@ -14,7 +14,7 @@ Web → JSON API / cookie session → server-side entity RBAC; отдельно 
 
 teams, users, sessions, services, environments, ingest_keys, ingest_events, outbox, alert_rules, rule_revisions, alerts, incidents, timeline, maintenance, oncall_schedules, escalations, notifications, postmortems, stream_events.
 
-Дедупликация: UNIQUE(key_id,event_id). Fingerprint: SHA-256 от [serviceId, environmentId, ruleId, отсортированные пары выбранных labels]. Активный инцидент ищется по service + environment + team. Это политика агрегации текущей версии (все активные alerts одного сервиса и среды попадают в один incident).
+Дедупликация: UNIQUE(key_id,event_id). Fingerprint: SHA-256 от [serviceId, environmentId, ruleId, отсортированные пары выбранных labels]. Активный инцидент ищется по service + environment + team. В PostgreSQL используется pg_advisory_xact_lock по environment_id до поиска первого инцидента, а частичный уникальный индекс не допускает два незакрытых incident одного scope. Это политика агрегации текущей версии (все активные alerts одного сервиса и среды попадают в один incident).
 
 Временные значения записываются в UTC. Окно считается относительно времени worker; слишком поздние события (более 120 секунд относительно поступления) сохраняются с late=true, но не участвуют в текущих окнах. Рабочий worker переоценивает активные alerts каждые 2 секунды, чтобы восстановление происходило даже без новых событий.
 
@@ -46,7 +46,7 @@ Replay по POST /api/v1/replay вычисляет переходы в памя�
 ## Ограничения v0.1.0
 
 - Нет изолированного queue broker и горизонтально согласованного rate-limit.
-- Schema baseline создаётся через metadata.create_all, без полноценной системы upgrade/rollback.
+- Версия схемы v2 обновляется транзакционно через migrations.py (уникальный индекс активного инцидента и индексы фоновых задач); дальнейшие обновления должны добавляться как отдельные миграции.
 - Нет материализованной таблицы MetricWindow, 180-дневного retention агрегатов и удаления metadata инцидентов по 365 дням.
 - Записи в timeline не имеют отдельной политики запрета SQL UPDATE на уровне роли БД (append-only обеспечено API).
 - Replay simulator и проверенный fault-injection пока не поставлены.

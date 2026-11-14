@@ -33,7 +33,7 @@ from .models import (
     StreamEvent, Team, Timeline, User, utcnow,
 )
 
-app = FastAPI(title="SignalHarbor", version="0.1.0",
+app = FastAPI(title="SignalHarbor", version="0.2.0",
               description="Monitoring, alert correlation and incident response API")
 app.mount("/static", StaticFiles(directory="signalharbor/static"), name="static")
 

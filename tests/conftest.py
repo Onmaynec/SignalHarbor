@@ -9,6 +9,7 @@ if "signalharbor_test" not in url:
 
 from signalharbor.api import app, _buckets  # noqa: E402
 from signalharbor.auth import hash_password, hash_token  # noqa: E402
+from signalharbor.migrations import migrate  # noqa: E402
 from signalharbor.models import (  # noqa: E402
     Base, Environment, IngestKey, Rule, Schedule, Service, SessionLocal, Team, User, engine, utcnow,
 )
@@ -17,7 +18,7 @@ from signalharbor.models import (  # noqa: E402
 @pytest.fixture()
 def fixture_db():
     Base.metadata.drop_all(engine)
-    Base.metadata.create_all(engine)
+    migrate()
     _buckets.clear()
     with SessionLocal.begin() as db:
         team = Team(name="Infra")
