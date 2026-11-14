@@ -17,7 +17,7 @@
 | AT-11 | SSE reconnect catch-up | Не подтверждено E2E |
 | AT-12 | Postmortem и MTTA/MTTR по timeline | Автоматизирован частично: test_ack_idempotent_team_isolation_postmortem_metrics |
 
-Дополнительно реализованы негативные проверки RBAC, чужого serviceId, CSRF, late event. Интеграционные тесты требуют отдельной PostgreSQL БД `signalharbor_test`.
+Дополнительно реализованы негативные проверки RBAC, чужого serviceId, CSRF, late event, dry-run replay без записей и уведомлений, Markdown-export postmortem и статистических серий. Интеграционные тесты требуют отдельной PostgreSQL БД `signalharbor_test`.
 
 ## Блокеры полной приёмки
 

@@ -176,3 +176,55 @@ def test_observer_cannot_read_payload_or_timeline(client):
     status = client.get("/api/v1/incidents/1").json()
     assert status["summary"] == "Service status change"
     assert status["ownerId"] is None
+
+
+def test_replay_does_not_persist_or_notify(client):
+    login(client, "admin@example.test")
+    now = utcnow()
+    body = {
+        "ruleId": 1,
+        "events": [{"timestamp": now.isoformat(), "type": "error", "severity": "error"}
+                   for _ in range(40)],
+        "ticks": [(now + timedelta(minutes=k)).isoformat() for k in (6, 10)],
+    }
+    r = client.post("/api/v1/replay", json=body)
+    assert r.status_code == 200, r.text
+    result = r.json()
+    assert result["notifications"] == 0
+    assert result["persistedEvents"] == 0
+    assert result["transitions"][0]["state"] == "firing"
+    assert result["transitions"][-1]["state"] == "recovered"
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count(Event.id))) == 0
+        assert db.scalar(select(func.count(Notification.id))) == 0
+
+
+def test_severity_postmortem_export_and_series(client):
+    login(client, "admin@example.test")
+    assert client.post("/ingest/v1/events", json=make_events(40),
+                       headers={"x-ingest-key": "fixture-key"}).status_code == 200
+    drain_outbox()
+    severity = client.post("/api/v1/incidents/1/severity", json={
+        "severity": "critical", "expectedVersion": 1,
+    })
+    assert severity.status_code == 200, severity.text
+    assert severity.json()["version"] == 2
+    pm = client.put("/api/v1/incidents/1/postmortem", json={
+        "impact": "Elevated error rate", "rootCause": "Bad deployment",
+        "actionItems": [{"ownerId": 1, "text": "Add regression tests"}],
+    })
+    assert pm.status_code == 200, pm.text
+    out = client.get("/api/v1/incidents/1/postmortem.md")
+    assert out.status_code == 200
+    assert "Add regression tests" in out.text
+    series = client.get("/api/v1/series?hours=24")
+    assert series.status_code == 200, series.text
+    assert sum(x["count"] for x in series.json()["points"]) == 40
+
+
+def test_public_status_requires_explicit_allowlist(client, monkeypatch):
+    assert client.get("/status").json()["services"] == []
+    monkeypatch.setenv("PUBLIC_STATUS_SERVICE_IDS", "1")
+    result = client.get("/status")
+    assert result.status_code == 200
+    assert result.json()["services"] == [{"name": "api", "state": "operational"}]

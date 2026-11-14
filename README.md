@@ -45,7 +45,7 @@ docker compose exec api python -m signalharbor.cli \
 | FastAPI | JSON API, RBAC, события, инциденты, cookie-сессии, SSE |
 | PostgreSQL 16 | События, инциденты, правила, append-only timeline, outbox |
 | Worker | Применение правил, heartbeat detection, hysteresis, эскалации и retention |
-| Web UI | Обзор, алерты, инциденты, timeline, mock inbox, сервисы и администрирование |
+| Web UI | Обзор с почасовым графиком событий, алерты, инциденты, timeline, mock inbox, replay, сервисы и администрирование |
 | CLI | Тестовые события и heartbeat с backoff/jitter |
 | Compose | PostgreSQL + миграционный bootstrap + API + worker |
 
@@ -59,7 +59,10 @@ docker compose exec api python -m signalharbor.cli \
 - POST `/api/v1/alert-rules`, PUT `/api/v1/alert-rules/{id}?expectedVersion=1`.
 - GET `/api/v1/incidents`, POST `/{id}/ack`, POST `/{id}/resolve`, GET `/{id}/timeline`.
 - GET `/stream/incidents` — SSE, `Last-Event-ID` и восстановление после reconnect.
-- GET `/api/v1/dashboard`, GET `/api/v1/metrics`.
+- GET `/api/v1/dashboard`, GET `/api/v1/metrics`, GET `/api/v1/series` (почасовые графики).
+- POST `/api/v1/replay` — безопасная симуляция правил с управляемыми timestamp, без записи в БД и уведомлений.
+- GET `/api/v1/incidents/{id}/postmortem.md` — Markdown-экспорт, POST `/{id}/severity` — история изменений severity.
+- GET `/status` — публичная статусная сводка **только** для явно перечисленных `PUBLIC_STATUS_SERVICE_IDS`; по умолчанию пустая.
 
 Создание команды, сервиса, пользователя, окружения, ключей и расписаний также доступно в API и разделе управления. Все управляющие операции требуют сессии и CSRF-token.
 

@@ -701,6 +701,8 @@ def events(after: datetime | None = None, before: datetime | None = None,
         require_team(user, svc.team_id)
         q = q.where(Event.service_id == alert.service_id,
                     Event.environment_id == alert.environment_id)
+        for label, value in alert.label_values.items():
+            q = q.where(Event.labels[label].as_string() == str(value))
     if cursor:
         try:
             raw = json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
@@ -872,6 +874,12 @@ def postmortem(id: int, body: PostmortemBody,
     if not pm:
         pm = Postmortem(incident_id=id, created_by=user.id)
         db.add(pm)
+    for item in body.actionItems:
+        owner_id = item.get("ownerId")
+        desc = item.get("text")
+        owner = db.get(User, owner_id) if isinstance(owner_id, int) else None
+        if not owner or owner.team_id != i.team_id or not isinstance(desc, str) or not desc.strip():
+            fail(400, "Each action item requires text and an owner from the incident team")
     pm.impact = body.impact
     pm.root_cause = body.rootCause
     pm.action_items = body.actionItems
@@ -1009,3 +1017,8 @@ async def stream(request: Request):
                 await asyncio.sleep(2)
     return StreamingResponse(generate(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# Additional read-only analytics and reporting workflows.
+from .extras import router as extras_router  # noqa: E402
+app.include_router(extras_router)

@@ -1,7 +1,7 @@
 /* SignalHarbor operations UI. Never interpolate unescaped server text into HTML. */
 "use strict";
 const $ = (id) => document.getElementById(id);
-const state = {user:null, page:"overview", services:[], incidents:[], alerts:[], rules:[], users:[], teams:[], stream:null, loading:false, cursor:null};
+const state = {user:null, page:"overview", services:[], incidents:[], alerts:[], rules:[], users:[], teams:[], stream:null, loading:false, cursor:null, lastReplay:null};
 const titles = {
   overview:["REAL-TIME OVERVIEW","Обзор инфраструктуры","Состояние сервисов и реакция на инциденты"],
   incidents:["INCIDENT RESPONSE","Управление инцидентами","Подтверждение, назначение и расследование"],
@@ -129,8 +129,8 @@ async function loadPage(){
   state.loading=false;
 }
 async function overview(){
-  const [stats,inc,metrics] = await Promise.all([
-    api("/api/v1/dashboard"),api("/api/v1/incidents"),api("/api/v1/metrics")]);
+  const [stats,inc,metrics,series] = await Promise.all([
+    api("/api/v1/dashboard"),api("/api/v1/incidents"),api("/api/v1/metrics"),api("/api/v1/series?hours=24")]);
   state.incidents=inc;
   $("nav-incidents").textContent=stats.activeIncidents;
   const kpis=[
@@ -157,7 +157,10 @@ async function overview(){
     '</div><div class="stat-note">Выборка: '+metrics.ackSampleSize+'</div></div>'+
     '<div class="stat-card"><div class="stat-label">MTTR</div><div class="stat-num">'+average(metrics.mttrSeconds)+
     '</div><div class="stat-note">Выборка: '+metrics.resolutionSampleSize+'</div></div></div>');
-  $("view").innerHTML=summary+recent+metricsPanel;
+  const maxVolume=Math.max(1,...series.points.map(x=>x.count));
+  const bars=series.points.map(x=>'<div class="bar-track" title="'+h(x.at)+' · '+x.count+' событий"><div class="bar-value" style="height:'+(100*x.count/maxVolume).toFixed(2)+'%"></div></div>').join("");
+  const chart=panel("Поток событий","ПОСЛЕДНИЕ 24 ЧАСА · UTC",'<div class="bar-chart">'+bars+'</div><div class="chart-foot"><span>24 часа назад</span><span>Сейчас · максимум '+fmt(maxVolume)+' / час</span></div>');
+  $("view").innerHTML=summary+chart+recent+metricsPanel;
   action("Обновить",loadPage);
 }
 async function incidents(){
@@ -229,8 +232,11 @@ async function rules(){
   ]));
   $("view").innerHTML=panel("Политики обнаружения",list.length+" ПРАВИЛ",
     rows.length?table(["Имя","Тип","Окно","Порог","Recovery","Severity","Состояние"],rows):
-    empty("Правила не созданы","Добавьте правило для ошибок или heartbeat"));
+    empty("Правила не созданы","Добавьте правило для ошибок или heartbeat"))+
+    (state.lastReplay?panel("Результат replay","DRY RUN · БЕЗ УВЕДОМЛЕНИЙ",
+      '<pre class="mono replay-output">'+h(JSON.stringify(state.lastReplay,null,2))+'</pre>'):"");
   if(isAdmin())action("+ Правило",createRuleModal,true);
+  action("▶ Replay",replayModal);
 }
 async function inbox(){
   const list=await api("/api/v1/notifications");
@@ -288,7 +294,9 @@ async function incidentDetail(id){
     (canOperate()&&i.state==="open"?'<button class="primary" data-action="ack" data-id="'+i.id+'">Подтвердить ACK</button>':"")+
     (canCommand()&&i.state!=="resolved"?'<button data-action="resolve" data-id="'+i.id+'">Закрыть инцидент</button>':"")+
     (canOperate()?'<button data-action="comment" data-id="'+i.id+'">Комментарий</button>':"")+
-    (canCommand()?'<button data-action="postmortem" data-id="'+i.id+'">Postmortem</button>':"")+'</div>';
+    (canCommand()&&i.state!=="resolved"?'<button data-action="severity" data-id="'+i.id+'">Изменить severity</button>':"")+
+    (canCommand()&&i.state!=="resolved"?'<button data-action="assign" data-id="'+i.id+'">Назначить</button>':"")+
+    (canCommand()?'<button data-action="postmortem" data-id="'+i.id+'">Postmortem</button><a class="export-link" href="/api/v1/incidents/'+i.id+'/postmortem.md">Экспорт .md</a>':"")+'</div>';
   const details='<div class="detail-grid">'+[
     ["Состояние",tag(i.state)],["Severity",tag(i.severity)],
     ["Сервис / среда","#"+i.serviceId+" / #"+i.environmentId],
@@ -371,6 +379,19 @@ function adminDialog(actionType){
         startsAt:new Date(f.get("startsAt")).toISOString(),endsAt:new Date(f.get("endsAt")).toISOString(),
       }}));
 }
+function replayModal(){
+  const now=Date.now();
+  const sample=JSON.stringify(Array.from({length:40},()=>({timestamp:new Date(now).toISOString(),type:"error",severity:"error"})),null,2);
+  const ticks=JSON.stringify([new Date(now+6*60000).toISOString(),new Date(now+10*60000).toISOString()],null,2);
+  modal("Replay без уведомлений",'<div class="form-grid"><label class="full">Правило<select name="ruleId">'+optionList(state.rules.map(r=>({id:r.id,name:r.name})))+'</select></label>'+
+    formField("События (JSON array)","events","textarea",sample,"required")+
+    formField("Контрольные точки времени (JSON array)","ticks","textarea",ticks,"required")+"</div>",
+    async f=>{
+      const response=await api("/api/v1/replay",{method:"POST",body:{ruleId:Number(f.get("ruleId")),
+        events:JSON.parse(f.get("events")),ticks:JSON.parse(f.get("ticks"))}});
+      state.lastReplay=response;
+    });
+}
 async function perform(actionType,id){
   if(actionType==="detail")return incidentDetail(id);
   if(actionType==="service")return serviceDetail(id);
@@ -389,6 +410,19 @@ async function perform(actionType,id){
     if(!confirm("Отозвать ключ #"+id+"?"))return;
     await api("/api/v1/ingest-keys/"+id+"/revoke",{method:"POST"});showMessage("Ключ отозван",true);
     return loadPage();
+  }
+  if(actionType==="severity"){
+    const i=await api("/api/v1/incidents/"+id);
+    return modal("Severity INC-"+id,'<div class="form-grid"><label>Severity<select name="severity">'+
+      ["low","medium","high","critical"].map(x=>'<option'+(i.severity===x?" selected":"")+'>'+x+"</option>").join("")+
+      "</select></label></div>",
+      f=>api("/api/v1/incidents/"+id+"/severity",{method:"POST",body:{severity:f.get("severity"),expectedVersion:i.version}}));
+  }
+  if(actionType==="assign"){
+    const i=await api("/api/v1/incidents/"+id);
+    const options=state.users.filter(x=>x.teamId===i.teamId);
+    return modal("Владелец INC-"+id,'<label>Ответственный<select name="ownerId">'+optionList(options)+"</select></label>",
+      f=>api("/api/v1/incidents/"+id+"/assign",{method:"POST",body:{ownerId:Number(f.get("ownerId")),expectedVersion:i.version}}));
   }
   if(actionType==="resolve")
     return modal("Закрыть инцидент #"+id,formField("Причина закрытия","reason","textarea","",'minlength="5" required'),
