@@ -8,7 +8,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session as DBSession
 
 from .auth import (
@@ -16,7 +16,7 @@ from .auth import (
 )
 from .engine import aware, emit
 from .models import (
-    Event, Incident, Postmortem, Rule, Service, SessionLocal, utcnow,
+    Event, Incident, MetricHour, Postmortem, Rule, Service, SessionLocal, utcnow,
 )
 
 router = APIRouter()
@@ -64,6 +64,76 @@ def series(hours: int = 24, user: User = Depends(current_user),
             "points": [{"at": (top - timedelta(hours=k)).isoformat(),
                         "count": counts.get(top - timedelta(hours=k), 0)}
                        for k in range(hours - 1, -1, -1)]}
+
+
+@router.get("/api/v1/history", tags=["analytics"])
+def history(days: int = 30, serviceId: int | None = None,
+            user: User = Depends(current_user), db: DBSession = Depends(db_session)):
+    """Daily totals from archived hourly metrics plus not-yet-archived raw events.
+
+    Archival and raw deletion commit together, making the two sources
+    mutually exclusive even while the retention worker is operating.
+    """
+    if user.role == ROLE_OBSERVER:
+        denied("Observer cannot inspect historical events")
+    if not 1 <= days <= 180:
+        denied("days must be 1..180", 400)
+    if serviceId is not None:
+        service = db.get(Service, serviceId)
+        if not service:
+            denied("Service not found", 404)
+        require_team(user, service.team_id)
+
+    top = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    start = top - timedelta(days=days - 1)
+    archive_day = func.date_trunc("day", MetricHour.bucket_at)
+    archived = select(
+        archive_day.label("day"),
+        func.sum(MetricHour.event_count).label("total"),
+        func.sum(MetricHour.error_count).label("errors"),
+        func.sum(MetricHour.late_count).label("late"),
+    ).where(MetricHour.bucket_at >= start)
+    if user.role != "admin":
+        archived = archived.where(MetricHour.team_id == user.team_id)
+    if serviceId is not None:
+        archived = archived.where(MetricHour.service_id == serviceId)
+    archived = archived.group_by(archive_day)
+
+    live_day = func.date_trunc("day", Event.received_at)
+    live = select(
+        live_day.label("day"),
+        func.count(Event.id).label("total"),
+        func.count(Event.id).filter(
+            or_(Event.kind == "error", Event.severity == "error"),
+        ).label("errors"),
+        func.count(Event.id).filter(Event.late.is_(True)).label("late"),
+    ).select_from(Event).join(Service, Event.service_id == Service.id).where(
+        Event.received_at >= start,
+    )
+    if user.role != "admin":
+        live = live.where(Service.team_id == user.team_id)
+    if serviceId is not None:
+        live = live.where(Event.service_id == serviceId)
+    live = live.group_by(live_day)
+
+    totals = {}
+    for query in (archived, live):
+        for item in db.execute(query):
+            day = aware(item.day).date().isoformat()
+            counter = totals.setdefault(day, [0, 0, 0])
+            counter[0] += int(item.total or 0)
+            counter[1] += int(item.errors or 0)
+            counter[2] += int(item.late or 0)
+    points = []
+    for k in range(days - 1, -1, -1):
+        day = (top - timedelta(days=k)).date().isoformat()
+        count, errors, late = totals.get(day, [0, 0, 0])
+        points.append({"at": day, "count": count, "errors": errors, "late": late})
+    return {
+        "bucket": "day", "timezone": "UTC", "days": days,
+        "policy": {"rawDays": 30, "metricsDays": 180, "resolvedIncidentDays": 365},
+        "points": points,
+    }
 
 
 class ReplayEvent(BaseModel):

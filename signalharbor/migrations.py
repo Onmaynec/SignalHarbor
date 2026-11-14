@@ -9,10 +9,10 @@ from __future__ import annotations
 
 from sqlalchemy import inspect, select, text
 
-from .models import Base, SchemaVersion, WorkerStatus, engine
+from .models import Base, LoginAttempt, MetricHour, SchemaVersion, WorkerStatus, engine
 
 
-LATEST_VERSION = 3
+LATEST_VERSION = 4
 MIGRATIONS = {
     2: [
         # A concurrent worker cannot open two active incidents for one scope.
@@ -26,6 +26,7 @@ MIGRATIONS = {
            ON incidents (created_at) WHERE state = 'open'""",
     ],
     3: [],  # Worker status is created via its versioned SQLAlchemy Table DDL.
+    4: [],  # MetricHour and LoginAttempt are versioned tables.
 }
 
 
@@ -54,7 +55,10 @@ def migrate():
             # Keep the original v1 baseline stable; v3 table is created only by v3.
             Base.metadata.create_all(connection, tables=[
                 table for table in Base.metadata.sorted_tables
-                if table.name != WorkerStatus.__tablename__
+                if table.name not in {
+                    WorkerStatus.__tablename__, MetricHour.__tablename__,
+                    LoginAttempt.__tablename__,
+                }
             ])
             connection.execute(SchemaVersion.__table__.insert().values(version=1))
             tables = set(inspect(connection).get_table_names())
@@ -76,5 +80,8 @@ def migrate():
                 connection.execute(text(statement))
             if version == 3:
                 WorkerStatus.__table__.create(connection, checkfirst=True)
+            if version == 4:
+                MetricHour.__table__.create(connection, checkfirst=True)
+                LoginAttempt.__table__.create(connection, checkfirst=True)
             connection.execute(SchemaVersion.__table__.insert().values(version=version))
     return LATEST_VERSION

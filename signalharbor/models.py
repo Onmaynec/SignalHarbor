@@ -259,6 +259,36 @@ class SchemaVersion(Base):
 
 
 
+class MetricHour(Base):
+    """Non-sensitive hourly aggregates retained after raw event deletion."""
+
+    __tablename__ = "metric_hours"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"))
+    service_id: Mapped[int] = mapped_column(ForeignKey("services.id"))
+    environment_id: Mapped[int] = mapped_column(ForeignKey("environments.id"))
+    bucket_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    event_count: Mapped[int] = mapped_column(BigInteger, default=0)
+    error_count: Mapped[int] = mapped_column(BigInteger, default=0)
+    late_count: Mapped[int] = mapped_column(BigInteger, default=0)
+    __table_args__ = (
+        UniqueConstraint("team_id", "service_id", "environment_id", "bucket_at",
+                         name="uq_metric_hour_scope"),
+        Index("ix_metric_hours_team_bucket", "team_id", "bucket_at"),
+    )
+
+
+class LoginAttempt(Base):
+    """Short-lived, hashed login throttle state shared across API processes."""
+
+    __tablename__ = "login_attempts"
+    key_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    window_started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    failures: Mapped[int] = mapped_column(Integer, default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (Index("ix_login_attempts_window", "window_started_at"),)
+
+
 class WorkerStatus(Base):
     """Worker heartbeats survive API restarts; old instances become stale."""
 

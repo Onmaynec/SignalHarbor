@@ -42,8 +42,10 @@ def main():
                 scan_health()
                 scan_escalations()
                 last_scan = now
-            if now - last_retention >= 3600:
-                retention()
+            if now - last_retention >= 60:
+                result = retention()
+                if any(result.values()):
+                    logger.info("retention completed %s", result)
                 last_retention = now
             if count == 0:
                 time.sleep(0.5)

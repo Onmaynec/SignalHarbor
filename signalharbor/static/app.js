@@ -252,7 +252,7 @@ async function inbox(){
 }
 async function diagnostics(){
   if(!isAdmin())return;
-  const data=await api("/api/v1/ops");
+  const [data,history]=await Promise.all([api("/api/v1/ops"),api("/api/v1/history?days=30")]);
   const seconds=x=>x===null?"—":(Number(x).toFixed(1)+" с");
   const ms=x=>x===null?"—":(Number(x).toFixed(0)+" мс");
   const blocks=[
@@ -274,6 +274,18 @@ async function diagnostics(){
     ["Принято этим API-процессом",fmt(data.processCounters.ingestEvents)],
     ["Отклонений 429 в этом процессе",fmt(data.processCounters.rejected429)]
   ];
+  const maxHistory=Math.max(1,...history.points.map(p=>p.count));
+  const historicalBars=history.points.map(p=>
+    '<div class="bar-track" title="'+h(p.at)+' · '+p.count+
+    ' событий"><div class="bar-value" style="height:'+
+    (100*p.count/maxHistory).toFixed(2)+'%"></div></div>'
+  ).join("");
+  const archive=panel("Исторические события","30 ДНЕЙ · RAW + АРХИВ",
+    '<div class="bar-chart">'+historicalBars+'</div>'+
+    '<div class="chart-foot"><span>30 дней назад</span><span>Сегодня · максимум '+
+    fmt(maxHistory)+' / день</span></div>'+
+    '<div class="diagnostics-note">Хранение: raw 30 дней, агрегаты 180 дней, '+
+    'завершённые инциденты 365 дней после закрытия.</div>');
   const details=panel("Метрики приёма","POSTGRESQL / PROCESS",
     table(["Показатель","Значение"],rows.map(x=>row([h(x[0]),h(x[1])]))));
   const workerRows=data.workers.map(w=>row([
@@ -287,7 +299,7 @@ async function diagnostics(){
   const note=panel("Границы измерений","SLO НЕ ПОДТВЕРЖДЁН",
     '<div class="diagnostics-note">'+h(data.note)+
     ' Метрика p95 не заменяет 30-минутный нагрузочный тест с записью оборудования, очереди, ошибок и отдельной задержки обработки.</div>');
-  $("view").innerHTML=summary+details+workers+note;
+  $("view").innerHTML=summary+archive+details+workers+note;
   action("Обновить",loadPage);
 }
 

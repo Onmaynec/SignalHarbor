@@ -10,7 +10,7 @@ import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete, exists, func, or_, select, text
+from sqlalchemy import exists, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from .models import (
@@ -327,18 +327,7 @@ def scan_escalations(now: datetime | None = None, delay_seconds: int = 300):
 
 
 def retention(now: datetime | None = None):
-    from .models import Session as UserSession, SessionLocal, StreamEvent
-    now = now or utcnow()
-    cutoff = now - timedelta(days=30)
-    with SessionLocal.begin() as db:
-        # Do not remove a durable event while its corresponding outbox job is pending.
-        pending = exists(select(Outbox.id).where(
-            Outbox.kind == "ingest", Outbox.subject_id == Event.id,
-            Outbox.processed_at.is_(None),
-        ))
-        db.execute(delete(Event).where(Event.received_at < cutoff, ~pending))
-        db.execute(delete(Outbox).where(
-            Outbox.processed_at.is_not(None), Outbox.processed_at < cutoff,
-        ))
-        db.execute(delete(StreamEvent).where(StreamEvent.created_at < cutoff))
-        db.execute(delete(UserSession).where(UserSession.expires_at < now))
+    """Archive old raw data and prune expired records with a single transaction."""
+    from .lifecycle import retention as run_retention
+
+    return run_retention(now=now)

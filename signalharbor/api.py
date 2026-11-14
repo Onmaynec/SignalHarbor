@@ -28,13 +28,14 @@ from .auth import (
     hash_password, hash_token, require_team, session_cookie, user_from_request,
 )
 from .engine import aware, emit
+from .login_security import begin_login, failed_login, successful_login
 from .models import (
     Alert, Environment, Event, IngestKey, Incident, Maintenance, Notification,
     Outbox, Postmortem, Rule, RuleRevision, Schedule, Service, Session, SessionLocal,
     StreamEvent, Team, Timeline, User, WorkerStatus, utcnow,
 )
 
-app = FastAPI(title="SignalHarbor", version="0.4.0",
+app = FastAPI(title="SignalHarbor", version="0.5.0",
               description="Monitoring, alert correlation and incident response API")
 app.mount("/static", StaticFiles(directory="signalharbor/static"), name="static")
 
@@ -131,6 +132,8 @@ async def envelope(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
+    if request.url.path.startswith(("/api/", "/stream/")):
+        response.headers["Cache-Control"] = "no-store"
     return response
 
 
@@ -171,15 +174,26 @@ def ready(db: DBSession = Depends(db_session)):
 
 
 class LoginBody(BaseModel):
-    email: str
-    password: str
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+# The same password-hashing work is performed for nonexistent/disabled users.
+_DUMMY_LOGIN_HASH = hash_password("account-does-not-exist", salt="00" * 16)
 
 
 @app.post("/api/v1/login")
 def login(body: LoginBody, response: Response, db: DBSession = Depends(db_session)):
-    user = db.scalar(select(User).where(User.email == body.email.lower(), User.enabled.is_(True)))
-    if not user or not check_password(body.password, user.password_hash):
-        fail(401, "Invalid credentials")
+    email = body.email.strip().lower()
+    if not email:
+        fail(400, "Invalid input")
+    attempt, key = begin_login(db, email)
+    user = db.scalar(select(User).where(User.email == email, User.enabled.is_(True)))
+    stored_hash = user.password_hash if user else _DUMMY_LOGIN_HASH
+    password_valid = check_password(body.password, stored_hash)
+    if not user or not password_valid:
+        failed_login(db, attempt, key)
+    successful_login(db, attempt)
     token = create_login(db, user)
     session_cookie(response, token)
     response.set_cookie(
