@@ -2,7 +2,6 @@
 import os
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
 
 url = os.environ.get("DATABASE_URL", "")
 if "signalharbor_test" not in url:

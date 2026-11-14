@@ -71,7 +71,7 @@ def main():
         except HTTPError as exc:
             code = str(exc.code)
             statuses[code] = statuses.get(code, 0) + 1
-        except (URLError, TimeoutError) as exc:
+        except (URLError, TimeoutError):
             statuses["network_error"] = statuses.get("network_error", 0) + 1
         if idx % 20 == 0:
             print("Batch", idx + 1, "/", n_batches, "accepted", accepted, "errors", statuses)
