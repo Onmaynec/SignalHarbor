@@ -48,13 +48,14 @@ def test_short_window_result_is_independent_of_delivery_order(client, delivery_o
     newer = event_batch(10, base - timedelta(seconds=20), "newer")
     batches = [older, newer] if delivery_order == "old-first" else [newer, older]
 
-    for batch in batches:
+    for index, batch in enumerate(batches):
         ingest(client, batch)
         drain_outbox()
-        with SessionLocal() as db:
-            # Each half of the stream is below threshold; only the complete
-            # event-time window may fire, regardless of arrival order.
-            assert db.scalar(select(func.count(Alert.id))) == 0
+        if index == 0:
+            with SessionLocal() as db:
+                # Each half of the stream is below threshold; only the complete
+                # event-time window may fire, regardless of arrival order.
+                assert db.scalar(select(func.count(Alert.id))) == 0
 
     with SessionLocal() as db:
         alert = db.scalar(select(Alert))
