@@ -18,15 +18,20 @@ from signalharbor.models import (
 
 
 def test_migration_reentrant_and_index_exists(fixture_db):
-    assert migrate() == 2
-    assert migrate() == 2
+    assert migrate() == 3
+    assert migrate() == 3
     with SessionLocal() as db:
-        assert db.scalars(select(SchemaVersion.version).order_by(SchemaVersion.version)).all() == [1, 2]
+        assert db.scalars(select(SchemaVersion.version).order_by(SchemaVersion.version)).all() == [1, 2, 3]
     with engine.connect() as conn:
         indexes = {row[0] for row in conn.execute(text(
             "SELECT indexname FROM pg_indexes WHERE tablename = 'incidents'"
         )).all()}
     assert "uq_active_incident_scope" in indexes
+    with engine.connect() as conn:
+        worker_indexes = {row[0] for row in conn.execute(text(
+            "SELECT indexname FROM pg_indexes WHERE tablename = 'worker_status'"
+        )).all()}
+    assert "ix_worker_status_seen" in worker_indexes
 
 
 def test_active_incident_constraint_and_new_incident_after_resolution(fixture_db):
@@ -106,7 +111,7 @@ def test_legacy_duplicate_incident_blocks_migration(fixture_db):
     # Simulate an existing v1 database that contains duplicates.
     with engine.begin() as conn:
         conn.execute(text("DROP INDEX uq_active_incident_scope"))
-        conn.execute(text("DELETE FROM schema_version WHERE version = 2"))
+        conn.execute(text("DELETE FROM schema_version WHERE version >= 2"))
     with SessionLocal.begin() as db:
         db.add_all([
             Incident(team_id=1, service_id=1, environment_id=1,

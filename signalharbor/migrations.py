@@ -9,10 +9,10 @@ from __future__ import annotations
 
 from sqlalchemy import inspect, select, text
 
-from .models import Base, SchemaVersion, engine
+from .models import Base, SchemaVersion, WorkerStatus, engine
 
 
-LATEST_VERSION = 2
+LATEST_VERSION = 3
 MIGRATIONS = {
     2: [
         # A concurrent worker cannot open two active incidents for one scope.
@@ -25,6 +25,7 @@ MIGRATIONS = {
         """CREATE INDEX IF NOT EXISTS ix_incident_unacked
            ON incidents (created_at) WHERE state = 'open'""",
     ],
+    3: [],  # Worker status is created via its versioned SQLAlchemy Table DDL.
 }
 
 
@@ -50,7 +51,11 @@ def migrate():
             connection.execute(text("SELECT pg_advisory_xact_lock(139724, 200)"))
         tables = set(inspect(connection).get_table_names())
         if not tables:
-            Base.metadata.create_all(connection)
+            # Keep the original v1 baseline stable; v3 table is created only by v3.
+            Base.metadata.create_all(connection, tables=[
+                table for table in Base.metadata.sorted_tables
+                if table.name != WorkerStatus.__tablename__
+            ])
             connection.execute(SchemaVersion.__table__.insert().values(version=1))
             tables = set(inspect(connection).get_table_names())
         if "schema_version" not in tables:
@@ -69,5 +74,7 @@ def migrate():
                 _assert_unique_active_incidents(connection)
             for statement in MIGRATIONS[version]:
                 connection.execute(text(statement))
+            if version == 3:
+                WorkerStatus.__table__.create(connection, checkfirst=True)
             connection.execute(SchemaVersion.__table__.insert().values(version=version))
     return LATEST_VERSION

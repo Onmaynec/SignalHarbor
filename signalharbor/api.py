@@ -18,7 +18,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, exists, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as DBSession
 
@@ -31,10 +31,10 @@ from .engine import aware, emit
 from .models import (
     Alert, Environment, Event, IngestKey, Incident, Maintenance, Notification,
     Outbox, Postmortem, Rule, RuleRevision, Schedule, Service, Session, SessionLocal,
-    StreamEvent, Team, Timeline, User, utcnow,
+    StreamEvent, Team, Timeline, User, WorkerStatus, utcnow,
 )
 
-app = FastAPI(title="SignalHarbor", version="0.3.0",
+app = FastAPI(title="SignalHarbor", version="0.4.0",
               description="Monitoring, alert correlation and incident response API")
 app.mount("/static", StaticFiles(directory="signalharbor/static"), name="static")
 
@@ -1033,6 +1033,13 @@ def operations(user: User = Depends(allow(ROLE_ADMIN)), db: DBSession = Depends(
     backlog, first_pending = db.execute(select(
         func.count(Outbox.id), func.min(Outbox.created_at),
     ).where(pending_filter)).one()
+    due_event = exists(select(Event.id).where(
+        Event.id == Outbox.subject_id, Event.occurred_at <= now,
+    ))
+    ready = db.scalar(select(func.count(Outbox.id)).where(
+        Outbox.processed_at.is_(None),
+        or_(Outbox.kind != "ingest", due_event),
+    )) or 0
     processed_hour = db.scalar(select(func.count(Outbox.id)).where(
         Outbox.processed_at >= now - timedelta(hours=1),
     )) or 0
@@ -1052,8 +1059,28 @@ def operations(user: User = Depends(allow(ROLE_ADMIN)), db: DBSession = Depends(
     ])
     p95 = lags[max(0, math.ceil(0.95 * len(lags)) - 1)] if lags else None
     oldest_seconds = max(0, round((now - aware(first_pending)).total_seconds(), 2)) if first_pending else None
+    alive_since = now - timedelta(seconds=20)
+    worker_count = db.scalar(select(func.count(WorkerStatus.id)).where(
+        WorkerStatus.last_seen_at >= alive_since,
+    )) or 0
+    worker_rows = db.scalars(select(WorkerStatus).order_by(
+        WorkerStatus.last_seen_at.desc(),
+    ).limit(20)).all()
+    workers = [
+        {
+            "id": row.id, "lastSeenAt": iso(row.last_seen_at),
+            "startedAt": iso(row.started_at), "lastBatchAt": iso(row.last_batch_at),
+            "processedTotal": row.processed_count,
+            "errorsTotal": row.errors_count,
+            "healthy": aware(row.last_seen_at) >= alive_since,
+        }
+        for row in worker_rows
+    ]
     return {
-        "pendingOutbox": backlog, "oldestPendingSeconds": oldest_seconds,
+        "pendingOutbox": backlog, "pendingReady": ready,
+        "pendingDeferred": backlog - ready,
+        "oldestPendingSeconds": oldest_seconds,
+        "activeWorkers": worker_count, "workers": workers,
         "processedOutboxLastHour": processed_hour,
         "eventsReceivedLastHour": received_hour,
         "lateEventsLastHour": late_hour,

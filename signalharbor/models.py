@@ -8,7 +8,7 @@ import os
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    JSON, Boolean, DateTime, ForeignKey, Index, Integer,
+    JSON, BigInteger, Boolean, DateTime, ForeignKey, Index, Integer,
     String, Text, UniqueConstraint, create_engine
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
@@ -256,3 +256,17 @@ class SchemaVersion(Base):
     __tablename__ = "schema_version"
     version: Mapped[int] = mapped_column(Integer, primary_key=True)
     applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+
+class WorkerStatus(Base):
+    """Worker heartbeats survive API restarts; old instances become stale."""
+
+    __tablename__ = "worker_status"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_batch_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    processed_count: Mapped[int] = mapped_column(BigInteger, default=0)
+    errors_count: Mapped[int] = mapped_column(BigInteger, default=0)
+    __table_args__ = (Index("ix_worker_status_seen", "last_seen_at"),)

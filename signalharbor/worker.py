@@ -1,5 +1,6 @@
 """Stateless worker: database-backed retry semantics, no in-memory event queue."""
 import logging
+import os
 import signal
 import time
 
@@ -23,7 +24,7 @@ def main():
     logger.info("rule worker started")
     while running:
         try:
-            count = drain_outbox()
+            count = drain_outbox(batch_size=batch_size)
             now = time.monotonic()
             if now - last_scan >= 2:
                 scan_health()

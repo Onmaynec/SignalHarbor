@@ -256,7 +256,9 @@ async function diagnostics(){
   const seconds=x=>x===null?"—":(Number(x).toFixed(1)+" с");
   const ms=x=>x===null?"—":(Number(x).toFixed(0)+" мс");
   const blocks=[
-    ["Ожидают обработки",fmt(data.pendingOutbox),"Незавершённые outbox-задания",data.pendingOutbox>0],
+    ["Готовы к обработке",fmt(data.pendingReady),"Очередь без отложенных событий",data.pendingReady>0],
+    ["Отложено до timestamp",fmt(data.pendingDeferred),"Время события ещё не наступило",false],
+    ["Worker активны",fmt(data.activeWorkers),"Heartbeat за последние 20 секунд",data.activeWorkers===0],
     ["Самое старое задание",seconds(data.oldestPendingSeconds),"Возраст незавершённой задачи",false],
     ["Обработано за час",fmt(data.processedOutboxLastHour),"Из PostgreSQL, не локальный счётчик",false],
     ["Detection lag p95",ms(data.detectionLagP95Ms),"Выборка: "+data.detectionLagSamples+" новых firing",false]
@@ -274,10 +276,18 @@ async function diagnostics(){
   ];
   const details=panel("Метрики приёма","POSTGRESQL / PROCESS",
     table(["Показатель","Значение"],rows.map(x=>row([h(x[0]),h(x[1])]))));
+  const workerRows=data.workers.map(w=>row([
+    '<span class="mono">'+h(w.id.slice(0,16))+'</span>',
+    w.healthy?tag("resolved"):tag("critical"),
+    when(w.lastSeenAt),fmt(w.processedTotal),fmt(w.errorsTotal)
+  ]));
+  const workers=panel("Работа обработчиков",data.activeWorkers+" ONLINE",
+    workerRows.length?table(["Worker ID","Статус","Последний heartbeat","Processed","Ошибки"],workerRows):
+    empty("Нет heartbeat от worker","Убедитесь, что контейнер worker запущен и имеет доступ к PostgreSQL"));
   const note=panel("Границы измерений","SLO НЕ ПОДТВЕРЖДЁН",
     '<div class="diagnostics-note">'+h(data.note)+
     ' Метрика p95 не заменяет 30-минутный нагрузочный тест с записью оборудования, очереди, ошибок и отдельной задержки обработки.</div>');
-  $("view").innerHTML=summary+details+note;
+  $("view").innerHTML=summary+details+workers+note;
   action("Обновить",loadPage);
 }
 

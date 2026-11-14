@@ -82,19 +82,22 @@ def measure(db: Session, rule: Rule, service_id: int, env_id: int,
     ]
     for key, value in group_values.items():
         conditions.append(Event.labels[key].as_string() == str(value))
-    count = db.scalar(select(func.count(Event.id)).where(*conditions)) or 0
-    errors = db.scalar(select(func.count(Event.id)).where(
-        *conditions, or_(Event.kind == "error", Event.severity == "error"),
-    )) or 0
-    if rule.kind == "count_error":
-        return float(errors), int(errors)
-    if rule.kind == "error_rate":
-        return (100.0 * errors / count if count else 0.0), int(errors)
     if rule.kind == "heartbeat_missing":
         env = db.get(Environment, env_id)
         last = aware(env.last_heartbeat_at) if env and env.last_heartbeat_at else None
         baseline = last or (aware(env.created_at) if env else now)
         return max(0.0, (now - baseline).total_seconds()), 1
+    # One grouped SQL query instead of separate COUNT(*) round trips.
+    count, errors = db.execute(select(
+        func.count(Event.id),
+        func.count(Event.id).filter(
+            or_(Event.kind == "error", Event.severity == "error"),
+        ),
+    ).where(*conditions)).one()
+    if rule.kind == "count_error":
+        return float(errors), int(errors)
+    if rule.kind == "error_rate":
+        return (100.0 * errors / count if count else 0.0), int(errors)
     return 0.0, 0
 
 
@@ -181,19 +184,23 @@ def evaluate(db: Session, rule: Rule, service_id: int, env_id: int,
                 emit(db, incident, "alert_recovered", {"fingerprint": fp}, at=now)
 
 
-def process_event(db: Session, event: Event, now: datetime | None = None):
+def process_event(db: Session, event: Event, now: datetime | None = None,
+                  selected_rule: Rule | None = None):
     if event.late:
         return
     service = db.get(Service, event.service_id)
     if not service:
         return
     now = now or utcnow()
-    rules = db.scalars(select(Rule).where(
-        Rule.team_id == service.team_id, Rule.enabled.is_(True),
-        or_(Rule.service_id.is_(None), Rule.service_id == event.service_id),
-        or_(Rule.environment_id.is_(None), Rule.environment_id == event.environment_id),
-        Rule.kind.in_(["count_error", "error_rate"]),
-    )).all()
+    if selected_rule is None:
+        rules = db.scalars(select(Rule).where(
+            Rule.team_id == service.team_id, Rule.enabled.is_(True),
+            or_(Rule.service_id.is_(None), Rule.service_id == event.service_id),
+            or_(Rule.environment_id.is_(None), Rule.environment_id == event.environment_id),
+            Rule.kind.in_(["count_error", "error_rate"]),
+        )).all()
+    else:
+        rules = [selected_rule]
     for rule in rules:
         values = {name: str(event.labels.get(name, "")) for name in rule.group_labels}
         # Event-time watermark for bounded out-of-order arrivals. Never rewind
@@ -229,13 +236,54 @@ def drain_outbox(batch_size: int = 100, now: datetime | None = None) -> int:
         if engine.dialect.name == "postgresql":
             query = query.with_for_update(skip_locked=True)
         rows = db.scalars(query).all()
+        # Group committed events by rule, scope and label fingerprint. A batch
+        # of 500 identical events now evaluates a rule once, not 500 times.
+        ids = [row.subject_id for row in rows if row.kind == "ingest"]
+        events = {
+            event.id: event for event in db.scalars(
+                select(Event).where(Event.id.in_(ids))
+            ).all()
+        } if ids else {}
+        service_ids = {event.service_id for event in events.values()}
+        services = {
+            service.id: service for service in db.scalars(
+                select(Service).where(Service.id.in_(service_ids))
+            ).all()
+        } if service_ids else {}
+        team_ids = {service.team_id for service in services.values()}
+        all_rules = db.scalars(select(Rule).where(
+            Rule.team_id.in_(team_ids),
+            Rule.enabled.is_(True),
+            Rule.kind.in_(["count_error", "error_rate"]),
+        )).all() if team_ids else []
+        rules_by_team = {}
+        for rule in all_rules:
+            rules_by_team.setdefault(rule.team_id, []).append(rule)
+        groups = {}
         for row in rows:
-            if row.kind == "ingest":
-                event = db.get(Event, row.subject_id)
-                if event:
-                    process_event(db, event, now=now)
-            row.processed_at = utcnow()
+            event = events.get(row.subject_id) if row.kind == "ingest" else None
+            if event is not None and not event.late:
+                service = services.get(event.service_id)
+                if service is not None:
+                    for rule in rules_by_team.get(service.team_id, []):
+                        if rule.service_id is not None and rule.service_id != event.service_id:
+                            continue
+                        if rule.environment_id is not None and rule.environment_id != event.environment_id:
+                            continue
+                        labels = tuple(sorted(
+                            (name, str(event.labels.get(name, "")))
+                            for name in rule.group_labels
+                        ))
+                        key = (rule.id, event.service_id, event.environment_id, labels)
+                        previous = groups.get(key)
+                        if previous is None or aware(event.received_at) > aware(previous[1].received_at):
+                            groups[key] = (rule, event)
+            row.processed_at = now
             row.attempts += 1
+        # Stable lock order prevents AB/BA deadlocks with parallel workers.
+        for key in sorted(groups):
+            rule, event = groups[key]
+            process_event(db, event, now=now, selected_rule=rule)
         return len(rows)
 
 

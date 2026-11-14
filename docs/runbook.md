@@ -4,7 +4,7 @@
 
 Заполните .env по .env.example. Затем docker compose up --build -d; docker compose exec api python -m signalharbor.manage seed. После запуска проверьте curl http://localhost:8080/health/live и /health/ready.
 
-Сервис migrate запускает версионированные миграции (сейчас до v2) в транзакции и с PostgreSQL advisory lock. На пустой БД создаётся baseline v1; на существующей БД применяются только новые изменения. При отсутствии schema_version миграция останавливается, чтобы не угадывать структуру. Перед обновлением сделайте резервную копию; при дублях активных incident одного scope миграция v2 прервётся с ошибкой. Дубликаты нужно разбирать вручную с сохранением timeline, без принудительной потери данных.
+Сервис migrate запускает версионированные миграции (сейчас до v3) в транзакции и с PostgreSQL advisory lock. На пустой БД создаётся baseline v1; на существующей БД применяются только новые изменения. При отсутствии schema_version миграция останавливается, чтобы не угадывать структуру. Перед обновлением сделайте резервную копию; при дублях активных incident одного scope миграция v2 прервётся с ошибкой. Дубликаты нужно разбирать вручную с сохранением timeline, без принудительной потери данных.
 
 ## Логи и диагностика
 
@@ -12,11 +12,11 @@ docker compose ps
 docker compose logs --tail=200 api worker db
 docker compose exec db pg_isready -U signalharbor -d signalharbor
 
-GET /api/v1/ops от имени admin возвращает pendingOutbox, oldestPendingSeconds, processedOutboxLastHour, eventsReceivedLastHour, lateEventsLastHour и detectionLagP95Ms (до 5000 переходов firing за час), а также локальные processCounters. Счётчики processCounters не переживают перезапуск API. Значение p95 из timeline — оперативная оценка, а не доказательство SLO. Эти показатели доступны в интерфейсе: «Диагностика».
+GET /api/v1/ops от имени admin возвращает pendingOutbox, pendingReady, pendingDeferred, oldestPendingSeconds, activeWorkers, workers (heartbeat, ошибки и накопленный объём), processedOutboxLastHour, eventsReceivedLastHour, lateEventsLastHour и detectionLagP95Ms (до 5000 переходов firing за час), а также локальные processCounters. Счётчики processCounters не переживают перезапуск API. Значение p95 из timeline — оперативная оценка, а не доказательство SLO. Эти показатели доступны в интерфейсе: «Диагностика».
 
 Не записывайте токены в логи и issue. 401 для ingest означает отозванный/чужой ключ, 403 — чужой serviceId, 413 — превышен MAX_REQUEST_BYTES, 429 — превышен INGEST_RATE_PER_MIN (использовать Retry-After).
 
-При высоком backlog проверьте worker и его исключения, PostgreSQL latency, размер окна правила и число группируемых labels. Задания с event timestamp в пределах следующих 120 секунд могут легитимно оставаться pending до наступления времени события; отличайте их от настоящего накопления очереди.
+При высоком backlog проверьте worker и его исключения, PostgreSQL latency, размер окна правила и число группируемых labels. Если activeWorkers=0 более 20 секунд, проверьте `docker compose logs worker`, health/ready и таблицу worker_status. Настройка WORKER_BATCH_SIZE задаёт размер одной атомарной транзакции (1–500, по умолчанию 250). Увеличение размера пакета влияет на длительность блокировок и время повторной обработки после сбоя. Задания с event timestamp в пределах следующих 120 секунд могут легитимно оставаться pending до наступления времени события; отличайте их от настоящего накопления очереди.
 
 ## Бэкап
 
