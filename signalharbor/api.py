@@ -436,6 +436,54 @@ def quota_check(key_id: int, units: int):
 def persist(db: DBSession, key: IngestKey, entries: list[IncomingEvent]):
     env = db.get(Environment, key.environment_id)
     now = utcnow()
+    # One multi-row PostgreSQL INSERT instead of hundreds of SAVEPOINT round trips.
+    # The RETURNING set is the only source of new IDs, so duplicates have no outbox effect.
+    if db.bind.dialect.name == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+        values = []
+        for item in entries:
+            if item.serviceId != env.service_id:
+                fail(403, "Ingest key cannot write this service")
+            if item.timestamp.tzinfo is None:
+                fail(400, "timestamp must contain timezone")
+            occurred = item.timestamp.astimezone(timezone.utc)
+            if occurred > now + timedelta(minutes=2) or occurred < now - timedelta(days=30):
+                fail(400, "Timestamp outside permitted range")
+            check_depth(item.payload)
+            check_depth(item.labels)
+            values.append({
+                "key_id": key.id, "event_id": item.eventId,
+                "service_id": env.service_id, "environment_id": env.id,
+                "occurred_at": occurred, "received_at": now,
+                "severity": item.severity, "kind": item.type,
+                "payload": item.payload, "labels": item.labels,
+                "late": (now - occurred) > timedelta(minutes=2),
+            })
+        stmt = pg_insert(Event).values(values).on_conflict_do_nothing(
+            index_elements=["key_id", "event_id"],
+        ).returning(Event.id, Event.kind, Event.late, Event.occurred_at)
+        inserted_rows = db.execute(stmt).all()
+        outbox = [{"kind": "ingest", "subject_id": record.id}
+                  for record in inserted_rows
+                  if record.kind != "heartbeat" and not record.late]
+        if outbox:
+            db.execute(pg_insert(Outbox).values(outbox).on_conflict_do_nothing(
+                index_elements=["kind", "subject_id"],
+            ))
+        latest_pulse = max((aware(r.occurred_at) for r in inserted_rows
+                            if r.kind == "heartbeat"), default=None)
+        if latest_pulse:
+            db.execute(update(Environment).where(
+                Environment.id == env.id,
+                or_(Environment.last_heartbeat_at.is_(None),
+                    Environment.last_heartbeat_at < latest_pulse),
+            ).values(last_heartbeat_at=latest_pulse))
+        db.commit()
+        _counters["ingestBatches"] += 1
+        _counters["ingestEvents"] += len(inserted_rows)
+        return {"accepted": len(inserted_rows),
+                "duplicates": len(entries) - len(inserted_rows), "schemaVersion": 1}
+
     inserted = 0
     duplicates = 0
     for item in entries:

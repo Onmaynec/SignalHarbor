@@ -228,3 +228,16 @@ def test_public_status_requires_explicit_allowlist(client, monkeypatch):
     result = client.get("/status")
     assert result.status_code == 200
     assert result.json()["services"] == [{"name": "api", "state": "operational"}]
+
+
+def test_postgres_bulk_handles_duplicates_in_same_batch(client):
+    body = make_events(500)
+    body["events"][1]["eventId"] = body["events"][0]["eventId"]
+    result = client.post("/ingest/v1/events", json=body,
+                         headers={"x-ingest-key": "fixture-key"})
+    assert result.status_code == 200, result.text
+    assert result.json()["accepted"] == 499
+    assert result.json()["duplicates"] == 1
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count(Event.id))) == 499
+        assert db.scalar(select(func.count(Outbox.id))) == 499

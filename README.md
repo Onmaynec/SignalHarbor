@@ -36,7 +36,7 @@ docker compose exec api python -m signalharbor.cli \
   --url http://api:8000 --key '<your-one-time-ingest-key>' --service 1 --heartbeat
 ```
 
-Вместо CLI можно использовать POST /ingest/v1/events с заголовком `X-Ingest-Key`. Максимум 500 записей в батче, обязательна `schemaVersion: 1`; событие содержит `eventId`, `serviceId`, `timestamp` (UTC/offset), `severity`, `type`. HTTP 200 возвращается **после commit**. Повтор `eventId` внутри ingest key возвращает `duplicates` и не создаёт новое событие.
+Вместо CLI можно использовать POST /ingest/v1/events с заголовком `X-Ingest-Key`. Максимум 500 записей в батче, обязательна `schemaVersion: 1`; событие содержит `eventId`, `serviceId`, `timestamp` (UTC/offset), `severity`, `type`. В PostgreSQL батч записывается bulk INSERT с `ON CONFLICT DO NOTHING`, без 500 отдельных SAVEPOINT. HTTP 200 возвращается **после commit**. Повтор `eventId` внутри ingest key возвращает `duplicates` и не создаёт новое событие.
 
 ## Компоненты
 

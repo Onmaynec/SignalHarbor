@@ -4,6 +4,8 @@
 
 Client / CLI → POST ingest → проверка источника, schema, quota → транзакция PostgreSQL (Event + Outbox) → HTTP ACK.
 
+На PostgreSQL вставка до 500 событий выполняется одним INSERT ... ON CONFLICT DO NOTHING RETURNING, затем вставляются только новые outbox rows. Для SQLite (локальная разработка) остаётся безопасная поштучная вставка через SAVEPOINT. Задержки до 1 секунды ещё не подтверждены нагрузочным испытанием.
+
 Worker → SELECT pending outbox (PostgreSQL SKIP LOCKED) → расчёт window → unique fingerprint alert → active incident → timeline + stream event + mock notification → COMMIT. Обработка pending повторяется после падения worker; побочные эффекты должны быть идемпотентными.
 
 Web → JSON API / cookie session → server-side entity RBAC; отдельно SSE /stream/incidents c Last-Event-ID (данные из stream_events).
