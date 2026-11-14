@@ -34,3 +34,25 @@ jobs:
       - run: python -m compileall -q signalharbor
       - run: node --check signalharbor/static/app.js
       - run: cp .env.example .env && docker compose config --quiet
+
+  release:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish v0.2.0
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view v0.2.0 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release v0.2.0 already exists"
+            exit 0
+          fi
+          gh release create v0.2.0 \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "SignalHarbor v0.2.0 — Reliability Update" \
+            --notes-file docs/releases/v0.2.0.md
