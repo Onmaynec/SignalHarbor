@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from signalharbor import engine as rules_engine
 from signalharbor.engine import drain_outbox
 from signalharbor.models import (
-    Alert, Event, Incident, Outbox, Rule, SessionLocal, Timeline, WorkerStatus, utcnow,
+    Alert, Incident, Outbox, Rule, SessionLocal, Timeline, WorkerStatus, utcnow,
 )
 from signalharbor.worker_health import record_worker
 from .conftest import login, make_events
