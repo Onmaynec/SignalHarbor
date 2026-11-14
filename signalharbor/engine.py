@@ -123,11 +123,19 @@ def ensure_incident(db: Session, rule: Rule, service_id: int, env_id: int,
 
 
 def evaluate(db: Session, rule: Rule, service_id: int, env_id: int,
-             values: dict, now: datetime):
+             values: dict, now: datetime, *, window_end: datetime | None = None,
+             source_received_at: datetime | None = None):
     if not rule.enabled:
         return
     fp = fingerprint(rule, service_id, env_id, values)
-    value, occurrences = measure(db, rule, service_id, env_id, values, now)
+    if db.bind.dialect.name == "postgresql":
+        # Serialize creation of identical fingerprints before the SELECT. The
+        # UNIQUE index remains the final line of defence against duplicates.
+        lock_key = int.from_bytes(bytes.fromhex(fp)[:4], "big", signed=True)
+        db.execute(text("SELECT pg_advisory_xact_lock(139725, :key)"), {"key": lock_key})
+    value, occurrences = measure(
+        db, rule, service_id, env_id, values, window_end or now,
+    )
     firing = (value >= rule.threshold) if rule.kind == "heartbeat_missing" else (value > rule.threshold)
     alert = db.scalar(select(Alert).where(Alert.fingerprint == fp).with_for_update())
     if firing:
@@ -155,7 +163,12 @@ def evaluate(db: Session, rule: Rule, service_id: int, env_id: int,
             db.add(alert)
             db.flush()
             incident = ensure_incident(db, rule, service_id, env_id, now, alert)
-            emit(db, incident, "alert_fired", {"fingerprint": fp, "value": value}, at=now)
+            payload = {"fingerprint": fp, "value": value}
+            if source_received_at is not None:
+                payload["detectionLagMs"] = max(
+                    0, round((now - aware(source_received_at)).total_seconds() * 1000),
+                )
+            emit(db, incident, "alert_fired", payload, at=now)
         alert.suppressed = in_maintenance(db, env_id, now)
     elif alert and alert.state in ("firing", "acknowledged"):
         if alert.healthy_since is None:
@@ -183,13 +196,36 @@ def process_event(db: Session, event: Event, now: datetime | None = None):
     )).all()
     for rule in rules:
         values = {name: str(event.labels.get(name, "")) for name in rule.group_labels}
-        evaluate(db, rule, event.service_id, event.environment_id, values, now)
+        # Event-time watermark for bounded out-of-order arrivals. Never rewind
+        # the group to a stale event after a newer event has been committed.
+        filter_by_group = [
+            Event.service_id == event.service_id,
+            Event.environment_id == event.environment_id,
+            Event.late.is_(False),
+            Event.occurred_at <= now,
+            Event.occurred_at >= now - timedelta(seconds=rule.window_seconds + 120),
+        ]
+        for name, value in values.items():
+            filter_by_group.append(Event.labels[name].as_string() == value)
+        watermark = db.scalar(select(func.max(Event.occurred_at)).where(*filter_by_group))
+        evaluate(db, rule, event.service_id, event.environment_id, values, now,
+                 window_end=aware(watermark) if watermark else now,
+                 source_received_at=event.received_at)
 
 
-def drain_outbox(batch_size: int = 100) -> int:
+def drain_outbox(batch_size: int = 100, now: datetime | None = None) -> int:
     from .models import SessionLocal, engine
+    now = now or utcnow()
     with SessionLocal.begin() as db:
-        query = select(Outbox).where(Outbox.processed_at.is_(None)).order_by(Outbox.id).limit(batch_size)
+        # Events with forward clock skew stay queued until their event time.
+        # Otherwise a future-timestamp event would be processed and lost.
+        due = exists(select(Event.id).where(
+            Event.id == Outbox.subject_id, Event.occurred_at <= now,
+        ))
+        query = select(Outbox).where(
+            Outbox.processed_at.is_(None),
+            or_(Outbox.kind != "ingest", due),
+        ).order_by(Outbox.id).limit(batch_size)
         if engine.dialect.name == "postgresql":
             query = query.with_for_update(skip_locked=True)
         rows = db.scalars(query).all()
@@ -197,7 +233,7 @@ def drain_outbox(batch_size: int = 100) -> int:
             if row.kind == "ingest":
                 event = db.get(Event, row.subject_id)
                 if event:
-                    process_event(db, event)
+                    process_event(db, event, now=now)
             row.processed_at = utcnow()
             row.attempts += 1
         return len(rows)

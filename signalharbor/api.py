@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import math
 import os
 import secrets
 import time
@@ -33,7 +34,7 @@ from .models import (
     StreamEvent, Team, Timeline, User, utcnow,
 )
 
-app = FastAPI(title="SignalHarbor", version="0.2.0",
+app = FastAPI(title="SignalHarbor", version="0.3.0",
               description="Monitoring, alert correlation and incident response API")
 app.mount("/static", StaticFiles(directory="signalharbor/static"), name="static")
 
@@ -1026,23 +1027,63 @@ def metrics(user: User = Depends(current_user), db: DBSession = Depends(db_sessi
 
 @app.get("/api/v1/ops")
 def operations(user: User = Depends(allow(ROLE_ADMIN)), db: DBSession = Depends(db_session)):
-    backlog = db.scalar(select(func.count(Outbox.id)).where(Outbox.processed_at.is_(None))) or 0
-    return {"pendingOutbox": backlog, "processCounters": dict(_counters),
-            "note": "Process counters reset when the API restarts; use DB for durable event counts."}
+    """Durable queue and detection metrics from PostgreSQL, plus process-local counters."""
+    now = utcnow()
+    pending_filter = Outbox.processed_at.is_(None)
+    backlog, first_pending = db.execute(select(
+        func.count(Outbox.id), func.min(Outbox.created_at),
+    ).where(pending_filter)).one()
+    processed_hour = db.scalar(select(func.count(Outbox.id)).where(
+        Outbox.processed_at >= now - timedelta(hours=1),
+    )) or 0
+    received_hour = db.scalar(select(func.count(Event.id)).where(
+        Event.received_at >= now - timedelta(hours=1),
+    )) or 0
+    late_hour = db.scalar(select(func.count(Event.id)).where(
+        Event.received_at >= now - timedelta(hours=1), Event.late.is_(True),
+    )) or 0
+    recent = db.scalars(select(Timeline).where(
+        Timeline.kind == "alert_fired",
+        Timeline.created_at >= now - timedelta(hours=1),
+    ).order_by(Timeline.id.desc()).limit(5000)).all()
+    lags = sorted([
+        float(t.data["detectionLagMs"]) for t in recent
+        if isinstance(t.data, dict) and isinstance(t.data.get("detectionLagMs"), (int, float))
+    ])
+    p95 = lags[max(0, math.ceil(0.95 * len(lags)) - 1)] if lags else None
+    oldest_seconds = max(0, round((now - aware(first_pending)).total_seconds(), 2)) if first_pending else None
+    return {
+        "pendingOutbox": backlog, "oldestPendingSeconds": oldest_seconds,
+        "processedOutboxLastHour": processed_hour,
+        "eventsReceivedLastHour": received_hour,
+        "lateEventsLastHour": late_hour,
+        "detectionLagP95Ms": p95, "detectionLagSamples": len(lags),
+        "processCounters": dict(_counters),
+        "note": "Detection p95 is sampled from up to 5000 firing transitions (last hour), "
+                "not a validated end-to-end SLO. Counters reset on API restart.",
+    }
+
+
+def stream_rows(db: DBSession, user: User, after_id: int, limit: int = 100):
+    """Read only events in the *current* authorization scope."""
+    query = select(StreamEvent).where(StreamEvent.id > after_id)
+    if user.role != ROLE_ADMIN:
+        query = query.where(StreamEvent.team_id == user.team_id)
+    return db.scalars(query.order_by(StreamEvent.id).limit(limit)).all()
 
 
 @app.get("/stream/incidents")
 async def stream(request: Request):
-    # EventSource authenticates through HttpOnly same-site cookie; Last-Event-ID
-    # provides lossless catch-up within the documented 30-day event-stream retention.
+    # Authenticate at connection start and re-check session, role, and team for
+    # every poll. Logout or team reassignment cannot leave a stale SSE reader.
     with SessionLocal() as db:
-        user = user_from_request(request, db)
-        team_id = None if user.role == ROLE_ADMIN else user.team_id
-        user_id = user.id
+        user_from_request(request, db)
     raw = request.headers.get("last-event-id", request.query_params.get("lastEventId", "0"))
     try:
-        cursor = max(0, int(raw))
-    except ValueError:
+        cursor = int(raw)
+        if cursor < 0 or cursor > 9223372036854775807:
+            raise ValueError()
+    except (ValueError, TypeError):
         fail(400, "Invalid Last-Event-ID")
 
     async def generate():
@@ -1050,17 +1091,22 @@ async def stream(request: Request):
         yield "retry: 2000\n\n"
         while not await request.is_disconnected():
             with SessionLocal() as db:
-                u = db.get(User, user_id)
-                if not u or not u.enabled:
+                try:
+                    user = user_from_request(request, db)
+                except HTTPException:
                     return
-                q = select(StreamEvent).where(StreamEvent.id > cursor)
-                if team_id is not None:
-                    q = q.where(StreamEvent.team_id == team_id)
-                rows = db.scalars(q.order_by(StreamEvent.id).limit(100)).all()
-                for row in rows:
-                    cursor = row.id
-                    body = json.dumps({"kind": row.kind, **row.content}, ensure_ascii=False)
-                    yield "id: " + str(row.id) + "\ndata: " + body + "\n\n"
+                rows = stream_rows(db, user, cursor, 100)
+                # Materialize before closing the DB session; no query runs
+                # while yielding to a slow browser.
+                messages = []
+                for item in rows:
+                    body = json.dumps(
+                        {"kind": item.kind, **item.content}, ensure_ascii=False,
+                    )
+                    messages.append((item.id, "id: " + str(item.id) + "\ndata: " + body + "\n\n"))
+            for event_id, payload in messages:
+                cursor = event_id
+                yield payload
             if len(rows) < 100:
                 yield ": heartbeat\n\n"
                 await asyncio.sleep(2)

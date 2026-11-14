@@ -6,7 +6,7 @@ Client / CLI → POST ingest → проверка источника, schema, qu
 
 На PostgreSQL вставка до 500 событий выполняется одним INSERT ... ON CONFLICT DO NOTHING RETURNING, затем вставляются только новые outbox rows. Для SQLite (локальная разработка) остаётся безопасная поштучная вставка через SAVEPOINT. Задержки до 1 секунды ещё не подтверждены нагрузочным испытанием.
 
-Worker → SELECT pending outbox (PostgreSQL SKIP LOCKED) → расчёт window → unique fingerprint alert → active incident → timeline + stream event + mock notification → COMMIT. Обработка pending повторяется после падения worker; побочные эффекты должны быть идемпотентными.
+Worker → SELECT только готовые по timestamp pending outbox (PostgreSQL SKIP LOCKED) → расчёт window → advisory lock fingerprint → unique fingerprint alert → active incident → timeline + stream event + mock notification → COMMIT. Обработка pending повторяется после падения worker; побочные эффекты должны быть идемпотентными.
 
 Web → JSON API / cookie session → server-side entity RBAC; отдельно SSE /stream/incidents c Last-Event-ID (данные из stream_events).
 
@@ -16,7 +16,7 @@ teams, users, sessions, services, environments, ingest_keys, ingest_events, outb
 
 Дедупликация: UNIQUE(key_id,event_id). Fingerprint: SHA-256 от [serviceId, environmentId, ruleId, отсортированные пары выбранных labels]. Активный инцидент ищется по service + environment + team. В PostgreSQL используется pg_advisory_xact_lock по environment_id до поиска первого инцидента, а частичный уникальный индекс не допускает два незакрытых incident одного scope. Это политика агрегации текущей версии (все активные alerts одного сервиса и среды попадают в один incident).
 
-Временные значения записываются в UTC. Окно считается относительно времени worker; слишком поздние события (более 120 секунд относительно поступления) сохраняются с late=true, но не участвуют в текущих окнах. Рабочий worker переоценивает активные alerts каждые 2 секунды, чтобы восстановление происходило даже без новых событий.
+Временные значения записываются в UTC. Бounded out-of-order события (не старше 120 секунд относительно получения) при evaluation используют event-time watermark выбранной группы: максимальный timestamp её уже записанных допустимых событий. Это позволяет учесть 90-секундную задержку даже в 30-секундном окне. Для активных alert и recovery периодическая проверка каждые 2 секунды выполняется по времени worker. Слишком поздние события (>120 секунд) сохраняются с late=true и не запускают rule-engine. События с допустимым будущим timestamp остаются pending в durable outbox до наступления timestamp.
 
 ## Достоверность и конкуренция
 
@@ -39,14 +39,16 @@ ACK реализован одним условным UPDATE по состоян�
 
 График содержит первичного и резервного дежурного, UTC startsAt, duration rotationMinutes, timezone (IANA). Расчёт ротации идёт по абсолютному времени UTC; timezone хранится для интерпретации/отображения. L1 — текущему primary при создании incident, L2 — текущему backup при отсутствии ACK через 300 секунд. Если график не настроен, incident сохраняется, но адресного уведомления нет.
 
+Первые срабатывания alert записывают в timeline поле detectionLagMs — задержку от received_at исходного события до перехода firing. GET /api/v1/ops предоставляет размер и возраст pending outbox, почасовые counters, p95 по ограниченной выборке свежих alert_fired (не является подтверждённым SLO). SSE повторно проверяет текущие права и сессию при каждой итерации чтения; завершённые/отозванные сессии прекращают поток.
+
 Replay по POST /api/v1/replay вычисляет переходы в памяти по контролируемым событиям и ticks. Он не создаёт Events, incidents, timeline и Notification, поэтому не порождает реального вызова дежурного.
 
 Страница /status отдает только название и операционный статус явно разрешённых PUBLIC_STATUS_SERVICE_IDS. По умолчанию список пуст.
 
-## Ограничения v0.1.0
+## Ограничения v0.3.0
 
 - Нет изолированного queue broker и горизонтально согласованного rate-limit.
 - Версия схемы v2 обновляется транзакционно через migrations.py (уникальный индекс активного инцидента и индексы фоновых задач); дальнейшие обновления должны добавляться как отдельные миграции.
 - Нет материализованной таблицы MetricWindow, 180-дневного retention агрегатов и удаления metadata инцидентов по 365 дням.
 - Записи в timeline не имеют отдельной политики запрета SQL UPDATE на уровне роли БД (append-only обеспечено API).
-- Replay simulator и проверенный fault-injection пока не поставлены.
+- Replay simulator доступен, но проверенный fault-injection с kill/restart контейнеров пока не проведён.

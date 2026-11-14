@@ -12,11 +12,11 @@ docker compose ps
 docker compose logs --tail=200 api worker db
 docker compose exec db pg_isready -U signalharbor -d signalharbor
 
-GET /api/v1/ops от имени admin возвращает pendingOutbox и локальные счётчики ingest/rejects. Счётчики не переживают перезапуск api.
+GET /api/v1/ops от имени admin возвращает pendingOutbox, oldestPendingSeconds, processedOutboxLastHour, eventsReceivedLastHour, lateEventsLastHour и detectionLagP95Ms (до 5000 переходов firing за час), а также локальные processCounters. Счётчики processCounters не переживают перезапуск API. Значение p95 из timeline — оперативная оценка, а не доказательство SLO. Эти показатели доступны в интерфейсе: «Диагностика».
 
 Не записывайте токены в логи и issue. 401 для ingest означает отозванный/чужой ключ, 403 — чужой serviceId, 413 — превышен MAX_REQUEST_BYTES, 429 — превышен INGEST_RATE_PER_MIN (использовать Retry-After).
 
-При высоком backlog проверьте worker и его исключения, PostgreSQL latency, размер окна правила и число группируемых labels.
+При высоком backlog проверьте worker и его исключения, PostgreSQL latency, размер окна правила и число группируемых labels. Задания с event timestamp в пределах следующих 120 секунд могут легитимно оставаться pending до наступления времени события; отличайте их от настоящего накопления очереди.
 
 ## Бэкап
 
@@ -46,4 +46,4 @@ cat signalharbor-backup.dump | docker compose exec -T db sh -c 'PGPASSWORD="$POS
 
 python scripts/load.py --url http://localhost:8080 --key KEY --service 1 --minutes 30 --rate 2000 --output load-report.json
 
-Отчёт включает p50/p95 и число 429/ошибок. Он не подтверждает p95 detection до отдельной проверки задержки firing и не заменяет документирование оборудования.
+Отчёт включает p50/p95 HTTP acknowledge и число 429/ошибок. Отдельно сохраняйте снимки GET /api/v1/ops, но не приравнивайте ограниченную выборку firing к полному detection p95; необходимо нагрузочное измерение задержки и backlog на протяжении всего 30-минутного прогона.

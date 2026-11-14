@@ -10,6 +10,7 @@ const titles = {
   services:["SERVICE CATALOG","Реестр сервисов","Сервисы и окружения в контуре наблюдения"],
   rules:["DETECTION POLICIES","Правила мониторинга","Версионированные пороги и окна"],
   inbox:["NOTIFICATION CENTER","Мои уведомления","Локальная имитация каналов доставки"],
+  diagnostics:["INGEST & DETECTION","Диагностика","Задержка обработки, очередь задач и обнаружение алертов"],
   admin:["WORKSPACE SETTINGS","Управление системой","Команды, пользователи, ключи и графики"],
 };
 function h(value) {
@@ -108,7 +109,7 @@ function action(label,callback,primary=false){
   if(primary)b.className="primary";b.onclick=callback;$("page-actions").append(b);
 }
 async function navigate(page){
-  if(page==="admin"&&!isAdmin())return;
+  if(["admin","diagnostics"].includes(page)&&!isAdmin())return;
   state.page=page;state.cursor=null;
   await loadPage();
 }
@@ -124,6 +125,7 @@ async function loadPage(){
     else if(state.page==="services")await services();
     else if(state.page==="rules")await rules();
     else if(state.page==="inbox")await inbox();
+    else if(state.page==="diagnostics")await diagnostics();
     else if(state.page==="admin")await admin();
   }catch(error){$("view").innerHTML=empty("Не удалось загрузить данные",error.message);showMessage(error.message);}
   state.loading=false;
@@ -248,6 +250,37 @@ async function inbox(){
     rows.length?table(["Инцидент","Приоритет","Уровень","Отправлено"],rows):
     empty("Уведомлений нет","Настройте графики дежурств и превысьте порог правила"));
 }
+async function diagnostics(){
+  if(!isAdmin())return;
+  const data=await api("/api/v1/ops");
+  const seconds=x=>x===null?"—":(Number(x).toFixed(1)+" с");
+  const ms=x=>x===null?"—":(Number(x).toFixed(0)+" мс");
+  const blocks=[
+    ["Ожидают обработки",fmt(data.pendingOutbox),"Незавершённые outbox-задания",data.pendingOutbox>0],
+    ["Самое старое задание",seconds(data.oldestPendingSeconds),"Возраст незавершённой задачи",false],
+    ["Обработано за час",fmt(data.processedOutboxLastHour),"Из PostgreSQL, не локальный счётчик",false],
+    ["Detection lag p95",ms(data.detectionLagP95Ms),"Выборка: "+data.detectionLagSamples+" новых firing",false]
+  ];
+  const summary='<div class="stats-grid">'+blocks.map(x=>
+    '<div class="stat-card'+(x[3]?' highlight':'')+'"><div class="stat-label">'+h(x[0])+
+    '</div><div class="stat-num">'+h(x[1])+'</div><div class="stat-note">'+h(x[2])+'</div></div>'
+  ).join("")+'</div>';
+  const rows=[
+    ["Получено событий за час",fmt(data.eventsReceivedLastHour)],
+    ["Поздних событий за час",fmt(data.lateEventsLastHour)],
+    ["Батчей в этом API-процессе",fmt(data.processCounters.ingestBatches)],
+    ["Принято этим API-процессом",fmt(data.processCounters.ingestEvents)],
+    ["Отклонений 429 в этом процессе",fmt(data.processCounters.rejected429)]
+  ];
+  const details=panel("Метрики приёма","POSTGRESQL / PROCESS",
+    table(["Показатель","Значение"],rows.map(x=>row([h(x[0]),h(x[1])]))));
+  const note=panel("Границы измерений","SLO НЕ ПОДТВЕРЖДЁН",
+    '<div class="diagnostics-note">'+h(data.note)+
+    ' Метрика p95 не заменяет 30-минутный нагрузочный тест с записью оборудования, очереди, ошибок и отдельной задержки обработки.</div>');
+  $("view").innerHTML=summary+details+note;
+  action("Обновить",loadPage);
+}
+
 async function admin(){
   if(!isAdmin())return;
   const keys=await api("/api/v1/ingest-keys");
