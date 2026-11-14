@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#111317">
+  <title>SignalHarbor — Operations Center</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div id="login" class="login-cover">
+    <div class="login-card">
+      <div class="brand"><span class="brand-mark">◈</span><span>Signal<span class="brand-light">Harbor</span></span></div>
+      <div class="eyebrow">OPS CONTROL PLATFORM</div>
+      <h1>Операционная ясность<br>вместо шума.</h1>
+      <p class="muted">Единая панель для сигналов, инцидентов и дежурств.</p>
+      <form id="login-form">
+        <label>Email <input id="login-email" type="email" required autocomplete="username" placeholder="admin@signalharbor.local"></label>
+        <label>Пароль <input id="login-password" type="password" required autocomplete="current-password" placeholder="••••••••••••"></label>
+        <button class="primary wide" type="submit">Войти в систему</button>
+        <p id="login-error" class="error"></p>
+      </form>
+      <div class="login-footer">SELF-HOSTED MONITORING · v0.1.0</div>
+    </div>
+    <div class="login-art"><div class="pulse-circle"></div><div class="login-overlay"><span class="eyebrow">OBSERVABILITY / INCIDENT RESPONSE</span><h2>Каждый сигнал<br>имеет значение.</h2><p>Durable ingest · Alert correlation · On-call</p></div></div>
+  </div>
+  <div id="app" class="app hidden">
+    <aside class="sidebar">
+      <a class="brand" href="#" aria-label="SignalHarbor"><span class="brand-mark">◈</span><span>Signal<span class="brand-light">Harbor</span></span></a>
+      <div class="workspace-label">WORKSPACE</div>
+      <nav id="nav">
+        <button class="nav-link active" data-page="overview"><span>▦</span> Обзор</button>
+        <button class="nav-link" data-page="incidents"><span>◇</span> Инциденты <span class="nav-count" id="nav-incidents">0</span></button>
+        <button class="nav-link" data-page="alerts"><span>⚑</span> Алерты</button>
+        <button class="nav-link" data-page="events"><span>≡</span> События</button>
+        <button class="nav-link" data-page="services"><span>⬡</span> Сервисы</button>
+        <button class="nav-link" data-page="rules"><span>⌘</span> Правила</button>
+        <button class="nav-link" data-page="inbox"><span>✉</span> Уведомления</button>
+        <button class="nav-link admin-only" data-page="admin"><span>⚙</span> Управление</button>
+      </nav>
+      <div class="sidebar-bottom"><span class="online-dot"></span><span id="live-state">Подключение…</span><div class="server-label">SIGNALHARBOR CORE</div></div>
+    </aside>
+    <main class="main">
+      <header class="topbar"><div class="breadcrumbs">ОПЕРАЦИОННЫЙ ЦЕНТР <span>/</span> <strong id="breadcrumb">Обзор</strong></div><div class="user"><span id="user-email"></span><span class="role" id="user-role"></span><button id="logout" class="ghost small">Выйти</button></div></header>
+      <div class="content">
+        <div class="page-head"><div><p class="eyebrow" id="page-kicker">REAL-TIME OVERVIEW</p><h1 id="page-title">Обзор инфраструктуры</h1><p id="page-subtitle" class="muted">Состояние сервисов и реакция на инциденты</p></div><div class="head-actions" id="page-actions"></div></div>
+        <div id="message" role="status" class="toast hidden"></div>
+        <div id="view"></div>
+        <footer>SignalHarbor / Operations Center <span>UTC · REST API v1 · SSE</span></footer>
+      </div>
+    </main>
+  </div>
+  <div id="modal-layer" class="modal-layer hidden"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-head"><h2 id="modal-title">Детали</h2><button class="ghost" id="modal-close" aria-label="Закрыть">✕</button></div><div id="modal-body"></div></div></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
